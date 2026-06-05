@@ -1,9 +1,10 @@
 #import python module for reading .ini file
 from configparser import ConfigParser
+import os
 
 def load_config(filename='db_params.ini', section='postgresql'): 
     parser = ConfigParser() 
-    parser.read(filename)
+    parser.read(os.path.join(os.path.dirname(os.path.abspath(__file__)), filename))
 
     # create empty python dict to store connection params
     config = {}
