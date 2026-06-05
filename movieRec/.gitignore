@@ -1,5 +1,0 @@
-.env
-postgres_data/
-__pycache__/
-venv/
-.adk/
