@@ -1,1 +1,21 @@
-movieRec/movieRecommendation2/.env
+# Python / editor artifacts
+__pycache__/
+*.pyc
+.DS_Store
+.vscode/
+.venv/
+
+# ADK/session files and DB files
+.adk/
+*.db
+
+# Env files and secrets
+.env
+*.env
+
+# Keep Emb_Rerank local
+Emb_Rerank/
+
+# local logs
+index.log
+main.log
