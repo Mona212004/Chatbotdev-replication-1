@@ -9,6 +9,62 @@ from google.adk import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
+# --- BULLETPROOF FIX: Monkeypatch LiteLLM to strip reasoning_content from history ---
+import litellm
+
+orig_acompletion = litellm.acompletion
+orig_completion = litellm.completion
+
+
+def clean_messages(messages):
+    if isinstance(messages, list):
+        for msg in messages:
+            # Handle standard dictionary items
+            if isinstance(msg, dict):
+                msg.pop("reasoning_content", None)
+                if "message" in msg and isinstance(msg["message"], dict):
+                    msg["message"].pop("reasoning_content", None)
+            # Handle structured objects or Pydantic models safely
+            else:
+                if hasattr(msg, "reasoning_content"):
+                    try:
+                        delattr(msg, "reasoning_content")
+                    except Exception:
+                        try:
+                            setattr(msg, "reasoning_content", None)
+                        except Exception:
+                            pass
+                if hasattr(msg, "message"):
+                    inner = getattr(msg, "message", None)
+                    if isinstance(inner, dict):
+                        inner.pop("reasoning_content", None)
+                    elif inner and hasattr(inner, "reasoning_content"):
+                        try:
+                            delattr(inner, "reasoning_content")
+                        except Exception:
+                            try:
+                                setattr(inner, "reasoning_content", None)
+                            except Exception:
+                                pass
+    return messages
+
+
+async def patched_acompletion(*args, **kwargs):
+    if "messages" in kwargs:
+        kwargs["messages"] = clean_messages(kwargs["messages"])
+    return await orig_acompletion(*args, **kwargs)
+
+
+def patched_completion(*args, **kwargs):
+    if "messages" in kwargs:
+        kwargs["messages"] = clean_messages(kwargs["messages"])
+    return orig_completion(*args, **kwargs)
+
+
+litellm.acompletion = patched_acompletion
+litellm.completion = patched_completion
+# ----------------------------------------------------------------------------------
+
 # Import your configured root agent
 from movieRec.movieRecommendation2.agent import root_agent
 
@@ -40,24 +96,6 @@ async def chat(request: Request):
             return JSONResponse(
                 status_code=400, content={"error": "Message parameter is required"}
             )
-
-        # --- FIX: Clean up session history before executing the runner ---
-        # This prevents LiteLLM / Groq from crashing on historical 'reasoning_content' fields.
-        try:
-            session = await session_service.get_session(GLOBAL_SESSION_ID)
-            if session and "history" in session.state:
-                cleaned_history = []
-                for turn in session.state["history"]:
-                    # If it's a dictionary structure, drop the unsupported reasoning metadata
-                    if isinstance(turn, dict):
-                        turn.pop("reasoning_content", None)
-                        if "message" in turn and isinstance(turn["message"], dict):
-                            turn["message"].pop("reasoning_content", None)
-                    cleaned_history.append(turn)
-                session.state["history"] = cleaned_history
-        except Exception:
-            pass  # If no session or history exists yet, skip gracefully
-        # -----------------------------------------------------------------
 
         # Create the execution runner pointing to your root agent brain
         runner = Runner(
