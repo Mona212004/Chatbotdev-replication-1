@@ -1,7 +1,7 @@
 import os
 import sys
 import asyncio
-import re  # Added for thought-tag filtering
+import re
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
@@ -87,6 +87,61 @@ async def startup_event():
     )
 
 
+def clean_agent_thinking(text: str) -> str:
+    """Line-by-line filter to strip out raw text reasoning loops from the stream."""
+    # 1. Strip standard XML-style think tags if present
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+
+    # 2. Match common planning, validation, and self-correction sentences
+    skip_patterns = [
+        r"^username:.*",
+        r"^user id:.*",
+        r"^i will call.*",
+        r"^i should not.*",
+        r"^i will just.*",
+        r"^let's check.*",
+        r"^parameters:.*",
+        r"^proceed.*",
+        r"^wait, the prompt.*",
+        r"^calling tool.*",
+        r"^no other steps.*",
+        r"^output matches.*",
+        r"^done\b.*",
+        r"^let's generate.*",
+        r"^\[?self-correction.*",
+        r"^check step.*",
+        r"^step\s*\d+:.*",
+        r"^matches exactly.*",
+        r"^ready\b.*",
+        r"^the user has successfully.*",
+        r"^the tool output says:.*",
+        r"^i need to relay.*",
+        r"^no further action.*",
+        r"^`?sayhello\(.*",
+    ]
+
+    lines = text.split("\n")
+    filtered_lines = []
+
+    for line in lines:
+        trimmed = line.strip()
+        if not trimmed:
+            filtered_lines.append(line)
+            continue
+
+        # Evaluate line against our reasoning block signatures
+        should_skip = False
+        for pattern in skip_patterns:
+            if re.match(pattern, trimmed, re.IGNORECASE):
+                should_skip = True
+                break
+
+        if not should_skip:
+            filtered_lines.append(line)
+
+    return "\n".join(filtered_lines).strip()
+
+
 @app.post("/chat")
 async def chat(request: Request):
     try:
@@ -123,19 +178,11 @@ async def chat(request: Request):
                     if part.text:
                         response_text += part.text
 
-        # --- STREAM CLEANUP FIX: Strip out any raw thinking blocks or monologue text ---
-        # Removes hidden or explicit <think> tokens along with any internal step logic text block
-        response_text = re.sub(
-            r"<think>.*?</think>", "", response_text, flags=re.DOTALL
-        )
-        response_text = re.sub(
-            r"(The user is introducing themselves|According to the instructions|I will call sayHello).*?(\n|$)",
-            "",
-            response_text,
-        )
-        # -------------------------------------------------------------------------------
+        # --- STREAM CLEANUP FIX ---
+        response_text = clean_agent_thinking(response_text)
+        # ---------------------------
 
-        return {"response": response_text.strip()}
+        return {"response": response_text}
 
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
