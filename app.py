@@ -41,24 +41,42 @@ async def chat(request: Request):
                 status_code=400, content={"error": "Message parameter is required"}
             )
 
-        # 3. Create the execution runner pointing to your root agent brain
+        # --- FIX: Clean up session history before executing the runner ---
+        # This prevents LiteLLM / Groq from crashing on historical 'reasoning_content' fields.
+        try:
+            session = await session_service.get_session(GLOBAL_SESSION_ID)
+            if session and "history" in session.state:
+                cleaned_history = []
+                for turn in session.state["history"]:
+                    # If it's a dictionary structure, drop the unsupported reasoning metadata
+                    if isinstance(turn, dict):
+                        turn.pop("reasoning_content", None)
+                        if "message" in turn and isinstance(turn["message"], dict):
+                            turn["message"].pop("reasoning_content", None)
+                    cleaned_history.append(turn)
+                session.state["history"] = cleaned_history
+        except Exception:
+            pass  # If no session or history exists yet, skip gracefully
+        # -----------------------------------------------------------------
+
+        # Create the execution runner pointing to your root agent brain
         runner = Runner(
             app_name="movie_rec_app",
             agent=root_agent,
             session_service=session_service,
         )
 
-        # 4. Package the incoming plain-text message into the required GenAI Content structure
+        # Package the incoming plain-text message into the required GenAI Content structure
         content = types.Content(role="user", parts=[types.Part(text=user_message)])
 
-        # 5. Run the agent asynchronously over the persistent session thread
+        # Run the agent asynchronously over the persistent session thread
         events_async = runner.run_async(
             session_id=GLOBAL_SESSION_ID,
             user_id="default_web_user",
             new_message=content,
         )
 
-        # 6. Consume the asynchronous event stream and stitch together the text blocks
+        # Consume the asynchronous event stream and stitch together the text blocks
         response_text = ""
         async for event in events_async:
             if event.content and event.content.parts:
