@@ -1,6 +1,7 @@
 import os
 import sys
 import asyncio
+import re  # Added for thought-tag filtering
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
@@ -121,6 +122,18 @@ async def chat(request: Request):
                 for part in event.content.parts:
                     if part.text:
                         response_text += part.text
+
+        # --- STREAM CLEANUP FIX: Strip out any raw thinking blocks or monologue text ---
+        # Removes hidden or explicit <think> tokens along with any internal step logic text block
+        response_text = re.sub(
+            r"<think>.*?</think>", "", response_text, flags=re.DOTALL
+        )
+        response_text = re.sub(
+            r"(The user is introducing themselves|According to the instructions|I will call sayHello).*?(\n|$)",
+            "",
+            response_text,
+        )
+        # -------------------------------------------------------------------------------
 
         return {"response": response_text.strip()}
 
