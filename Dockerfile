@@ -5,6 +5,9 @@ FROM python:3.11-slim
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
+# Set the Python path so nested modules can find each other
+ENV PYTHONPATH=/app:/app/movieRec
+
 # 3. Set the working directory inside the container
 WORKDIR /app
 
