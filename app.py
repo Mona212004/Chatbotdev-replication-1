@@ -2,6 +2,7 @@ import os
 import sys
 import asyncio
 import re
+import json
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
@@ -10,11 +11,76 @@ from google.adk import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
-# --- BULLETPROOF FIX: Monkeypatch LiteLLM to strip reasoning_content from history ---
+# --- BULLETPROOF FIX: Monkeypatch LiteLLM to strip reasoning_content and fix tool array schemas ---
 import litellm
 
 orig_acompletion = litellm.acompletion
 orig_completion = litellm.completion
+
+
+def fix_json_arguments(args_str):
+    """Safely converts string arguments into list arrays if a model misformats them."""
+    if not args_str or not isinstance(args_str, str):
+        return args_str
+    try:
+        data = json.loads(args_str)
+        if isinstance(data, dict):
+            # Enforce array types on array fields
+            for field in ["movie_interests_titles", "liked_genres"]:
+                if field in data and isinstance(data[field], str):
+                    data[field] = [data[field]]
+            return json.dumps(data)
+    except Exception:
+        pass
+    return args_str
+
+
+def patch_tools_schema(kwargs):
+    """Bypasses local validation crashes by relaxing strict array constraints in the tool schema."""
+    try:
+        if "tools" in kwargs and isinstance(kwargs["tools"], list):
+            for tool in kwargs["tools"]:
+                if isinstance(tool, dict) and tool.get("type") == "function":
+                    func = tool.get("function", {})
+                    params = func.get("parameters", {})
+                    properties = params.get("properties", {})
+                    if isinstance(properties, dict):
+                        for field in ["movie_interests_titles", "liked_genres"]:
+                            if field in properties and isinstance(
+                                properties[field], dict
+                            ):
+                                if properties[field].get("type") == "array":
+                                    # Popping 'type' prevents validation errors if the model sends a string
+                                    properties[field].pop("type", None)
+    except Exception:
+        pass
+
+
+def fix_response_obj(response):
+    """Normalizes tool arguments inside the response object before passing back to the runner."""
+    if not response:
+        return response
+    try:
+        if hasattr(response, "choices") and response.choices:
+            for choice in response.choices:
+                if hasattr(choice, "message") and choice.message:
+                    msg = choice.message
+                    if hasattr(msg, "tool_calls") and msg.tool_calls:
+                        for tc in msg.tool_calls:
+                            if hasattr(tc, "function") and tc.function:
+                                if hasattr(tc.function, "arguments") and getattr(
+                                    tc.function, "arguments"
+                                ):
+                                    setattr(
+                                        tc.function,
+                                        "arguments",
+                                        fix_json_arguments(
+                                            getattr(tc.function, "arguments")
+                                        ),
+                                    )
+    except Exception:
+        pass
+    return response
 
 
 def clean_messages(messages):
@@ -25,6 +91,19 @@ def clean_messages(messages):
                 msg.pop("reasoning_content", None)
                 if "message" in msg and isinstance(msg["message"], dict):
                     msg["message"].pop("reasoning_content", None)
+
+                # Fix existing history tool calls if stored as dicts
+                if "tool_calls" in msg and isinstance(msg["tool_calls"], list):
+                    for tc in msg["tool_calls"]:
+                        if (
+                            isinstance(tc, dict)
+                            and "function" in tc
+                            and isinstance(tc["function"], dict)
+                        ):
+                            if "arguments" in tc["function"]:
+                                tc["function"]["arguments"] = fix_json_arguments(
+                                    tc["function"]["arguments"]
+                                )
             # Handle structured objects or Pydantic models safely
             else:
                 if hasattr(msg, "reasoning_content"):
@@ -35,6 +114,27 @@ def clean_messages(messages):
                             setattr(msg, "reasoning_content", None)
                         except Exception:
                             pass
+
+                if hasattr(msg, "tool_calls") and getattr(msg, "tool_calls"):
+                    tcs = getattr(msg, "tool_calls")
+                    if isinstance(tcs, list):
+                        for tc in tcs:
+                            if hasattr(tc, "function") and getattr(tc, "function"):
+                                func = getattr(tc, "function")
+                                if hasattr(func, "arguments") and getattr(
+                                    func, "arguments"
+                                ):
+                                    try:
+                                        setattr(
+                                            func,
+                                            "arguments",
+                                            fix_json_arguments(
+                                                getattr(func, "arguments")
+                                            ),
+                                        )
+                                    except Exception:
+                                        pass
+
                 if hasattr(msg, "message"):
                     inner = getattr(msg, "message", None)
                     if isinstance(inner, dict):
@@ -53,13 +153,17 @@ def clean_messages(messages):
 async def patched_acompletion(*args, **kwargs):
     if "messages" in kwargs:
         kwargs["messages"] = clean_messages(kwargs["messages"])
-    return await orig_acompletion(*args, **kwargs)
+    patch_tools_schema(kwargs)
+    res = await orig_acompletion(*args, **kwargs)
+    return fix_response_obj(res)
 
 
 def patched_completion(*args, **kwargs):
     if "messages" in kwargs:
         kwargs["messages"] = clean_messages(kwargs["messages"])
-    return orig_completion(*args, **kwargs)
+    patch_tools_schema(kwargs)
+    res = orig_completion(*args, **kwargs)
+    return fix_response_obj(res)
 
 
 litellm.acompletion = patched_acompletion
@@ -89,10 +193,8 @@ async def startup_event():
 
 def clean_agent_thinking(text: str) -> str:
     """Line-by-line filter to strip out raw text reasoning loops from the stream."""
-    # 1. Strip standard XML-style think tags if present
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
 
-    # 2. Match common planning, validation, and self-correction sentences
     skip_patterns = [
         r"^username:.*",
         r"^user id:.*",
@@ -129,7 +231,6 @@ def clean_agent_thinking(text: str) -> str:
             filtered_lines.append(line)
             continue
 
-        # Evaluate line against our reasoning block signatures
         should_skip = False
         for pattern in skip_patterns:
             if re.match(pattern, trimmed, re.IGNORECASE):
@@ -153,24 +254,20 @@ async def chat(request: Request):
                 status_code=400, content={"error": "Message parameter is required"}
             )
 
-        # Create the execution runner pointing to your root agent brain
         runner = Runner(
             app_name="movie_rec_app",
             agent=root_agent,
             session_service=session_service,
         )
 
-        # Package the incoming plain-text message into the required GenAI Content structure
         content = types.Content(role="user", parts=[types.Part(text=user_message)])
 
-        # Run the agent asynchronously over the persistent session thread
         events_async = runner.run_async(
             session_id=GLOBAL_SESSION_ID,
             user_id="default_web_user",
             new_message=content,
         )
 
-        # Consume the asynchronous event stream and stitch together the text blocks
         response_text = ""
         async for event in events_async:
             if event.content and event.content.parts:
@@ -178,9 +275,7 @@ async def chat(request: Request):
                     if part.text:
                         response_text += part.text
 
-        # --- STREAM CLEANUP FIX ---
         response_text = clean_agent_thinking(response_text)
-        # ---------------------------
 
         return {"response": response_text}
 
@@ -188,7 +283,6 @@ async def chat(request: Request):
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
-# Render Container Binding
 if __name__ == "__main__":
     import uvicorn
 
