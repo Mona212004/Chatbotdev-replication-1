@@ -1,12 +1,10 @@
 # convert a list of user queries to vector embedding
-import requests
+from movieRec.movieRecommendation2.sharedLibraries.config_embed_model import model
+from movieRec.movieRecommendation2.sharedLibraries.device import get_device
+from transformers import AutoTokenizer
 import numpy as np
 import os
 import logging
-
-from movieRec.movieRecommendation2.sharedLibraries.config_embed_model import (
-    EMBEDDING_SERVICE_URL,
-)
 
 # Configure logging to write to console (and/or a file if desired)
 # Set the desired level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
@@ -35,22 +33,47 @@ def query_to_vectors(user_queries):
         )
         raise ValueError("All user_queries must be non-empty strings.")
 
-    logger.info(f"Sending {len(user_queries)} queries to embedding service.")
+    # token check
+    tokenizer_name = "BAAI/bge-base-en-v1.5"
     try:
-        response = requests.post(
-            f"{EMBEDDING_SERVICE_URL}/embed",
-            json={"queries": user_queries},
-            timeout=30,
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+    except Exception as e:
+        logger.error(f"Failed to load tokenizer {tokenizer_name}: {e}")
+        raise
+
+    max_tokens = 512
+    instruction = "Represent this sentence for searching relevant passages: "
+
+    logger.info(
+        f"Starting token length check for {len(user_queries)} queries (Max: {max_tokens} tokens)."
+    )
+
+    for i, q in enumerate(user_queries):
+        full_query = instruction + q
+        tokens = tokenizer.encode(full_query, add_special_tokens=True)
+        if len(tokens) > max_tokens:
+            error_msg = f"Query {i+1} exceeds {max_tokens} tokens (length: {len(tokens)}). Query: '{q[:50]}...'"
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+
+    devices = get_device()
+    pool = None
+    logger.info(f"Using device(s): {devices}")
+    try:
+        full_queries = [instruction + q for q in user_queries]
+        # start multi-process pool (one-time setup for parallel encoding across devices)
+        logger.info("Starting multi-process pool for parallel encoding.")
+        pool = model.start_multi_process_pool(devices)
+        # encode with multi-process pool (distributes cross gpus/processes)
+        logger.info(f"Encoding {len(user_queries)} queries with batch size 32.")
+        q_embeddings = model.encode(
+            full_queries,
+            pool=pool,
+            batch_size=32,
+            chunk_size=512,
+            normalize_embeddings=True,
+            show_progress_bar=True,
         )
-        response.raise_for_status()
-        data = response.json()
-
-        if "error" in data:
-            logger.error(f"Embedding service returned an error: {data['error']}")
-            raise ValueError(data["error"])
-
-        q_embeddings = np.array(data["embeddings"])
-
         # validate embeddings
         if (
             q_embeddings is None
@@ -66,12 +89,14 @@ def query_to_vectors(user_queries):
         )
         logger.info(f"Shape of generated query embeddings: {q_embeddings.shape}.")
         return q_embeddings
-    except requests.RequestException as error:
-        logger.error(f"Embedding service request failed: {str(error)}", exc_info=True)
-        raise RuntimeError(f"Embedding service request failed: {str(error)}") from error
     except Exception as error:
         logger.error(f"Embedding generation failed: {str(error)}", exc_info=True)
         raise RuntimeError(f"Embedding generation failed: {str(error)}") from error
+    finally:
+        if pool is not None:
+            # stop the pool (cleanup)
+            logger.info("Stopping multi-process pool.")
+            model.stop_multi_process_pool(pool)
 
 
 if __name__ == "__main__":

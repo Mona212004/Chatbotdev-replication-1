@@ -1,4 +1,3 @@
-import os
+from sentence_transformers import SentenceTransformer, SimilarityFunction
+model = SentenceTransformer('BAAI/bge-base-en-v1.5', similarity_fn_name=SimilarityFunction.DOT_PRODUCT)
 
-# URL of the standalone embedding service (set this env var on the chatbot's Render service)
-EMBEDDING_SERVICE_URL = os.getenv("EMBEDDING_SERVICE_URL", "http://localhost:10000")
