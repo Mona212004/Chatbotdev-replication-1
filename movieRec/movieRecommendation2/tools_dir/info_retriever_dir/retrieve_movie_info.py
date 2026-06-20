@@ -1,15 +1,10 @@
 import time
 import logging
 import psycopg2
-
-# Ensure basic logging configuration if none exists
-if not logging.getLogger().handlers:
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
-    )
 from movieRec.config import load_config
 
-def get_movie_info(movie_title : str) -> str:
+
+def get_movie_info(movie_title: str) -> str:
     """
     Gets movie information from the local database given a movie title.
     """
@@ -20,7 +15,13 @@ def get_movie_info(movie_title : str) -> str:
     rows = []
     config = load_config()
     try:
-        with psycopg2.connect(**config) as conn:
+        # FIXED: Handle string (DATABASE_URL) vs dictionary mapping layout safely
+        if isinstance(config, str):
+            conn = psycopg2.connect(config)
+        else:
+            conn = psycopg2.connect(**config)
+
+        with conn:
             with conn.cursor() as cursor:
                 query = """
                     SELECT primarytitle, genres, averagerating, plot_summary, duration, plot_synopsis
@@ -31,6 +32,7 @@ def get_movie_info(movie_title : str) -> str:
                 """
                 cursor.execute(query, (f"%{movie_title}%",))
                 rows = cursor.fetchall()
+        conn.close()  # Safely return connection back to Neon pooler
     except Exception as db_err:
         logging.getLogger(__name__).error(f"Database transaction failure: {db_err}")
 
@@ -64,6 +66,7 @@ def get_movie_info(movie_title : str) -> str:
         (time.perf_counter() - start_time) * 1000,
     )
     return local_candidates_block
+
 
 if __name__ == "__main__":
     # Example usage for testing

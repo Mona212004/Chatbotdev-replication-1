@@ -1,0 +1,41 @@
+# Python / editor artifacts
+__pycache__/
+*.pyc
+.DS_Store
+.vscode/
+.venv/
+
+# ADK/session files and DB files
+.adk/
+*.db
+
+# Env files and secrets
+.env
+*.env
+
+# Keep Emb_Rerank local
+Emb_Rerank/
+archive/
+
+# local logs
+index.log
+main.log
+
+# =========================================================
+# Newly Added Local Backups, Databases, and Local Tools
+# =========================================================
+local_backup.dump
+site_scrapper_camtech-master/
+ProcessedData/
+PostgreSQL/
+createVectorDB/
+
+# Local database configuration files
+movieRec/db_params.ini
+movieRec/.env.example
+movieRec/init/01-schema.sql
+
+# Local development testing scripts
+movieRec/movieRecommendation2/entities/createUserTable.py
+movieRec/movieRecommendation2/entities/test_user_classes.py
+movieRec/movieRecommendation2/sharedLibraries/check_device.py

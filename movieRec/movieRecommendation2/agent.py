@@ -32,8 +32,6 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
-from google.adk.tools.agent_tool import AgentTool
-
 # get absolute path of this file
 current_file_path = Path(__file__).resolve()
 # go up to movieRecommendation2 dir (adjust levels as needed)
@@ -47,21 +45,35 @@ load_dotenv(dotenv_path=env_path)
 root_agent = None
 runner_root  = None #initialize runner
 
-# tools
-# greet = AgentTool(agent=greeting_agent, skip_summarization=True)
-# preference_manager = AgentTool(agent=preference_manager_agent, skip_summarization=True)
-# movie_finder = AgentTool(agent=movie_finder_agent, skip_summarization=True)
+# 1. Determine provider and model dynamically
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama")
 
+if LLM_PROVIDER == "groq":
+    # On Render, make sure to set ROOT_MODEL to a Groq-supported string (e.g., "qwen-2.5-32b" or "llama-3.3-70b-specdec")
+    active_model = os.getenv("ROOT_MODEL", "qwen-2.5-32b")
+    llm_instance = LiteLlm(
+        model=active_model,
+        api_base="https://api.groq.com/openai/v1",
+        api_key=os.getenv("GROQ_API_KEY"),
+        custom_llm_provider="openai",
+        temperature=0,
+    )
+else:
+    # Keeps your local setup working exactly as it is now
+    from .test_models import root_model
+
+    active_model = os.getenv("ROOT_MODEL", root_model)
+    llm_instance = LiteLlm(
+        model=active_model,
+        api_base="http://localhost:11434",
+        custom_llm_provider="ollama_chat",
+        temperature=0,
+    )
+
+# 2. Initialize the Orchestrator Agent using the correct cloud/local model instance
 try:
     root_agent = LlmAgent(
-        model=LiteLlm(
-            model=root_model,  # Now points to "ollama_chat/qwen2.5:7b"
-            api_base="http://localhost:11434",  # Directs calls to your local Ollama instance
-            temperature=0,
-            custom_llm_provider="ollama_chat",  # Keeps LiteLLM locked to the Ollama provider pipeline
-            # api_key=os.environ["GROQ_API_KEY"],
-            # tool_choice="required",
-        ),
+        model=llm_instance,  # Directly feeds the dynamic configuration here
         name="root_agent",
         description="The main coordinator agent. Your primary task is to delegate tasks to sub-agents and tools based on user query.",
         instruction=ORCHESTRATOR_AGENT_INSTRUCTION,

@@ -2,7 +2,7 @@
 
 from typing import List, Dict, Optional, Any
 from pydantic import BaseModel, ConfigDict
-from Emb_Rerank.Embeddings.createVectorDB.src.config_conn import load_config
+from movieRec.createVectorDB.src.config_conn import load_config
 import psycopg2
 from datetime import date
 import json

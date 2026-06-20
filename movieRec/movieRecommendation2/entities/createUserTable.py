@@ -1,6 +1,6 @@
 #only run once to create user table
 import psycopg2
-from Emb_Rerank.Embeddings.createVectorDB.src.config_conn import load_config
+from movieRec.createVectorDB.src.config_conn import load_config
 
 def create_user_table():
     """Create users table in the PostgreSQL database with the same connection as the embedding table."""
