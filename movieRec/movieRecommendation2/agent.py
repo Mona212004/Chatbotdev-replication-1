@@ -1,4 +1,5 @@
 """Agent module for main orchestrator agent"""
+
 # api key is with personal email
 # Ability:
 # agent greet
@@ -14,17 +15,27 @@ from google.adk.agents import LlmAgent
 from google.adk.models.lite_llm import LiteLlm
 
 import warnings
+
 warnings.filterwarnings("ignore")
 
 import logging
+
 logging.basicConfig(level=logging.ERROR)
 
 from .test_models import root_model
 from .tools_dir.greet_dir.greet import sayHello
-from .tools_dir.pref_manager_dir.preference_manager import get_preferences, update_preferences, remove_preferences, remove_all_preferences
+from .tools_dir.pref_manager_dir.preference_manager import (
+    get_preferences,
+    update_preferences,
+    remove_preferences,
+    remove_all_preferences,
+)
 from .tools_dir.movie_finder_dir.find_movie_tool import find_movie_title
 from .tools_dir.info_retriever_dir.retrieve_movie_info import get_movie_info
-from .tools_dir.recommender_dir.recommender import recommend_similar_to_movie, recommend_from_preferences
+from .tools_dir.recommender_dir.recommender import (
+    recommend_similar_to_movie,
+    recommend_from_preferences,
+)
 
 # debugging: see the request sent to the Ollama server
 
@@ -43,20 +54,22 @@ load_dotenv(dotenv_path=env_path)
 
 # use LLM
 root_agent = None
-runner_root  = None #initialize runner
+runner_root = None  # initialize runner
 
 # 1. Determine provider and model dynamically
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama")
 
 if LLM_PROVIDER == "groq":
-    # On Render, make sure to set ROOT_MODEL to a Groq-supported string (e.g., "qwen-2.5-32b" or "llama-3.3-70b-specdec")
-    active_model = os.getenv("ROOT_MODEL", "qwen-2.5-32b")
+    # On Render, ROOT_MODEL is set to "qwen/qwen3.6-27b"
+    active_model = os.getenv("ROOT_MODEL", "qwen/qwen3.6-27b")
     llm_instance = LiteLlm(
         model=active_model,
         api_base="https://api.groq.com/openai/v1",
         api_key=os.getenv("GROQ_API_KEY"),
         custom_llm_provider="openai",
         temperature=0,
+        reasoning_effort="none",  # turns off qwen3.6's thinking mode entirely — root fix for both leakage and latency
+        reasoning_format="hidden",  # belt-and-suspenders: strips any reasoning Groq still returns in the response
     )
 else:
     # Keeps your local setup working exactly as it is now
