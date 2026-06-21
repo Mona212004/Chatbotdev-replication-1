@@ -69,11 +69,12 @@ if LLM_PROVIDER == "groq":
         custom_llm_provider="openai",
         temperature=0,
         reasoning_effort="none",  # turns off qwen3.6's thinking mode entirely — root fix for both leakage and latency
-        reasoning_format="hidden",  # belt-and-suspenders: strips any reasoning Groq still returns in the response
         allowed_openai_params=[
-            "reasoning_effort",
-            "reasoning_format",
-        ],  # tells litellm these are valid pass-through params for this OpenAI-compatible endpoint
+            "reasoning_effort"
+        ],  # tells litellm this is a valid pass-through param for this OpenAI-compatible endpoint
+        extra_body={
+            "reasoning_format": "hidden"
+        },  # reasoning_format isn't a real openai SDK kwarg, so it has to go through extra_body to reach Groq's raw request body
     )
 else:
     # Keeps your local setup working exactly as it is now
