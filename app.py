@@ -269,13 +269,20 @@ async def chat(request: Request):
         )
 
         response_text = ""
+        tools_called = []
         async for event in events_async:
             if event.content and event.content.parts:
                 for part in event.content.parts:
                     if part.text:
                         response_text += part.text
+                    fc = getattr(part, "function_call", None)
+                    if fc and getattr(fc, "name", None):
+                        tools_called.append(fc.name)
 
         response_text = clean_agent_thinking(response_text)
+
+        if tools_called:
+            response_text = f"[Tool: {', '.join(tools_called)}]\n{response_text}"
 
         return {"response": response_text}
 
