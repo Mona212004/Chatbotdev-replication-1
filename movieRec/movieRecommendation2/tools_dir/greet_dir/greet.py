@@ -40,10 +40,15 @@ def sayHello(username: str, user_id: Optional[Any] = None) -> str:
         sayHello("Alice", 10)    # user_id provided → retrieves returning user by ID
         sayHello("Alice", 0)     # user_id=0 → creates new account
     """
-    
+
     if user_id is not None:
         val = str(user_id).lower().strip()
-        if val in ["0", "forgot", "i forgot", "none", "new account"]:
+        if val in ["none", "null", ""]:
+            # The model sometimes serializes "no ID yet" as the literal string "None"
+            # instead of a true null. Treat it the same as real None so we still look
+            # up the existing account by username instead of creating a duplicate.
+            user_id = None
+        elif val in ["0", "forgot", "i forgot", "new account"]:
             user_id = 0
         else:
             try:
@@ -51,13 +56,14 @@ def sayHello(username: str, user_id: Optional[Any] = None) -> str:
             except ValueError:
                 user_id = None  # Fallback to check by name
     #  print(f"--- Tool: sayHello tool called with username: {username}, user_id: {user_id} ---")
+    #  print(f"--- Tool: sayHello tool called with username: {username}, user_id: {user_id} ---")
 
     if user_id is None:
-        #print("No user_id provided. Check if username already exists in the database to avoid duplicate accounts.")
+        # print("No user_id provided. Check if username already exists in the database to avoid duplicate accounts.")
         User = func.get_user_by_name(username)
         if User is None:
             User = func.create_new_user(user_name=username)
-            return f"AUTH_SUCCESS: User {User.user_name}! Welcome to MovieRec! We have created a new account for you, your User ID is [{User.user_id}]. Please remember your user ID. I am handing you over to the recommendation expert now."
+            return f"AUTH_SUCCESS: User {User.user_name}! Welcome to MovieRec! We have created a new account for you, your User ID is [{User.user_id}]."
         else:
             # username exists, ask agent to prompt user for their ID
             # agent will call sayHello again with user_id once user provides it
@@ -70,13 +76,13 @@ def sayHello(username: str, user_id: Optional[Any] = None) -> str:
     elif user_id == 0:
         # user cannot remember their ID — create new account
         new_user = func.create_new_user(user_name=username)
-        return f"AUTH_SUCCESS: User {new_user.user_name}! A new account has been created for you. Your new User ID is [{new_user.user_id}]. Please remember your user ID. I am handing you over to the recommendation expert now."
+        return f"AUTH_SUCCESS: User {new_user.user_name}! A new account has been created for you. Your new User ID is [{new_user.user_id}]. Please remember your user ID."
     else:
         User = func.get_user(current_user_id=user_id)
         if User is None:
             # This case should ideally not happen if user_id is correctly managed in the session
             return f"Error: No user found with User ID: {user_id}. Please check your session management."
-        return f"AUTH_SUCCESS: User {User.user_name}, User ID: [{User.user_id}]! Your preferences are {User.preferences}. I am handing you over to the recommendation expert now!"
+        return f"AUTH_SUCCESS: User {User.user_name}, User ID: [{User.user_id}]! Your preferences are {User.preferences}."
 
 # test tool
 # if __name__ == "__main__":
