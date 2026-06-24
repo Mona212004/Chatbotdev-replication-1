@@ -19,16 +19,26 @@ orig_completion = litellm.completion
 
 
 def fix_json_arguments(args_str):
-    """Safely converts string arguments into list arrays if a model misformats them."""
+    """Safely converts string arguments into list arrays if a model misformats them,
+    and strips out serialized 'None'/'none'/'null' string values from list fields."""
     if not args_str or not isinstance(args_str, str):
         return args_str
     try:
         data = json.loads(args_str)
         if isinstance(data, dict):
-            # Enforce array types on array fields
             for field in ["movie_interests_titles", "liked_genres"]:
-                if field in data and isinstance(data[field], str):
-                    data[field] = [data[field]]
+                if field in data:
+                    # Coerce bare string to list
+                    if isinstance(data[field], str):
+                        data[field] = [data[field]]
+                    # Strip serialized None values the model passes when it means "no value"
+                    if isinstance(data[field], list):
+                        data[field] = [
+                            v
+                            for v in data[field]
+                            if isinstance(v, str)
+                            and v.strip().lower() not in ("none", "null", "")
+                        ]
             return json.dumps(data)
     except Exception:
         pass
