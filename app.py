@@ -179,15 +179,23 @@ app = FastAPI(title="AI Movie Recommender API")
 session_service = InMemorySessionService()
 GLOBAL_SESSION_ID = "movie_recommender_web_session"
 
+# Global singleton — Runner is expensive to instantiate; recreating it per request adds seconds of overhead
+runner = None
+
 
 @app.on_event("startup")
 async def startup_event():
-    """Pre-create a stable, continuous session thread on application startup."""
+    global runner
     await session_service.create_session(
         session_id=GLOBAL_SESSION_ID,
         state={},
         app_name="movie_rec_app",
         user_id="default_web_user",
+    )
+    runner = Runner(
+        app_name="movie_rec_app",
+        agent=root_agent,
+        session_service=session_service,
     )
 
 
@@ -254,12 +262,6 @@ async def chat(request: Request):
                 status_code=400, content={"error": "Message parameter is required"}
             )
 
-        runner = Runner(
-            app_name="movie_rec_app",
-            agent=root_agent,
-            session_service=session_service,
-        )
-
         content = types.Content(role="user", parts=[types.Part(text=user_message)])
 
         events_async = runner.run_async(
@@ -271,13 +273,19 @@ async def chat(request: Request):
         response_text = ""
         tools_called = []
         async for event in events_async:
+            # Collect tool names from all events (tool calls fire before the final response event)
             if event.content and event.content.parts:
                 for part in event.content.parts:
-                    if part.text:
-                        response_text += part.text
                     fc = getattr(part, "function_call", None)
                     if fc and getattr(fc, "name", None):
                         tools_called.append(fc.name)
+
+            # Only pull text from the final response — skips all intermediate tool call/result
+            # events that previously required clean_agent_thinking to filter out
+            if event.is_final_response() and event.content and event.content.parts:
+                for part in event.content.parts:
+                    if part.text:
+                        response_text += part.text
 
         response_text = clean_agent_thinking(response_text)
 
