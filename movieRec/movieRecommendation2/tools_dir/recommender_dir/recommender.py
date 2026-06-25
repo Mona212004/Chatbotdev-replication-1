@@ -218,7 +218,7 @@ def recommend_similar_to_movie(
                 ]
             )
             inner_select += (
-                f", (1.0 + 0.15 * ({genre_score_cases})) AS intersection_multiplier"
+                f", (1.0 + 0.4 * ({genre_score_cases})) AS intersection_multiplier"
             )
             all_params.extend([f"%{g}%" for g in target_genres])
         else:
@@ -266,6 +266,7 @@ def recommend_similar_to_movie(
 
     except Exception as e:
         return f"Error executing movie recommendation: {e}"
+
 
 def recommend_from_preferences(user_id: int) -> str:
     """
@@ -375,10 +376,11 @@ def recommend_from_preferences(user_id: int) -> str:
             )
             all_params.extend(exclude_tconsts)
 
-        if prefs.liked_genres:
-            genre_queries = ["c.genres ILIKE %s" for _ in prefs.liked_genres]
-            inner_from_where += f" AND ({' OR '.join(genre_queries)})"
-            all_params.extend([f"%{g}%" for g in prefs.liked_genres])
+        # NOTE: genre is intentionally NOT added as a hard WHERE filter here.
+        # liked_genres already boosts matching movies via intersection_multiplier in
+        # the ORDER BY. A hard filter would exclude all results when the user's
+        # preferred movie titles (e.g. Tomb Raider, Obsession) pull the mean vector
+        # into a different genre space than liked_genres (e.g. animated).
 
         # ── THE DECISIVE FIX: WRAP INTO A SUBQUERY Derived Table ──
         # Wrapping ensures that 'distance' and 'intersection_multiplier' are fully calculated
