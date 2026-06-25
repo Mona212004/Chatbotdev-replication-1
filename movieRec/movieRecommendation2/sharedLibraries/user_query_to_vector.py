@@ -57,23 +57,36 @@ def query_to_vectors(user_queries):
             raise ValueError(error_msg)
 
     devices = get_device()
-    pool = None
     logger.info(f"Using device(s): {devices}")
     try:
         full_queries = [instruction + q for q in user_queries]
-        # start multi-process pool (one-time setup for parallel encoding across devices)
-        logger.info("Starting multi-process pool for parallel encoding.")
-        pool = model.start_multi_process_pool(devices)
-        # encode with multi-process pool (distributes cross gpus/processes)
-        logger.info(f"Encoding {len(user_queries)} queries with batch size 32.")
-        q_embeddings = model.encode(
-            full_queries,
-            pool=pool,
-            batch_size=32,
-            chunk_size=512,
-            normalize_embeddings=True,
-            show_progress_bar=True,
-        )
+        # Use direct encode on CPU — start_multi_process_pool forks processes that
+        # share model weights via /dev/shm, which hits Docker's 64MB shm cap.
+        # Direct encode uses heap memory and is equally fast on a single CPU instance.
+        use_pool = len(devices) > 1 or (len(devices) == 1 and devices[0] != "cpu")
+        pool = None
+        if use_pool:
+            logger.info("Starting multi-process pool for parallel encoding.")
+            pool = model.start_multi_process_pool(devices)
+            logger.info(
+                f"Encoding {len(user_queries)} queries with pool, batch size 32."
+            )
+            q_embeddings = model.encode(
+                full_queries,
+                pool=pool,
+                batch_size=32,
+                chunk_size=512,
+                normalize_embeddings=True,
+                show_progress_bar=False,
+            )
+        else:
+            logger.info(f"Encoding {len(user_queries)} queries directly on CPU.")
+            q_embeddings = model.encode(
+                full_queries,
+                batch_size=32,
+                normalize_embeddings=True,
+                show_progress_bar=False,
+            )
         # validate embeddings
         if (
             q_embeddings is None
