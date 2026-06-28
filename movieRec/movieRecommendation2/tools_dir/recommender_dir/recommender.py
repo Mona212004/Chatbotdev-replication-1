@@ -301,6 +301,11 @@ def _fetch_vector_for_title(title: str, conn) -> tuple:
             db_embedding, db_tconst, db_genres, db_plot = row
             tconst = db_tconst
             genres = db_genres if db_genres else []
+            # Without register_vector, pgvector returns the embedding as a raw
+            # string "[0.1, 0.2, ...]". Parse it to a list so np.array() produces
+            # a proper float array rather than a 0-d string scalar.
+            if isinstance(db_embedding, str):
+                db_embedding = json.loads(db_embedding)
             if db_plot and db_plot.strip():
                 vector = db_embedding
             else:
@@ -360,14 +365,14 @@ def recommend_similar_to_movie(
             if vector_2 is not None:
                 # Mean the two vectors so results blend both films
                 v1 = (
-                    np.array(vector_1)
+                    np.array(vector_1, dtype=float)
                     if not isinstance(vector_1, np.ndarray)
-                    else vector_1
+                    else vector_1.astype(float)
                 )
                 v2 = (
-                    np.array(vector_2)
+                    np.array(vector_2, dtype=float)
                     if not isinstance(vector_2, np.ndarray)
-                    else vector_2
+                    else vector_2.astype(float)
                 )
                 target_vector = np.mean([v1, v2], axis=0).tolist()
                 if tconst_2:
