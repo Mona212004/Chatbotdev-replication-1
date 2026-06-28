@@ -105,7 +105,43 @@ def _extract_plot_text(raw_text: str) -> str:
         for l in lines
         if len(l.strip()) > 40 or (l.strip() and not l.strip().isupper())
     ]
-    return " ".join(lines)[:800].strip()
+    return " ".join(lines).strip()
+
+
+def _truncate_to_char_limit(text: str, char_limit: int = 400) -> str:
+    """
+    Truncates text to char_limit at a sentence boundary rather than mid-sentence.
+    Splits on '. ', '! ', '? ' and keeps complete sentences until the next one
+    would exceed char_limit. Falls back to a word boundary if no sentence fits.
+    Preserves full semantic content (genre, tone, resolution) that a raw char
+    slice would discard.
+    """
+    if len(text) <= char_limit:
+        return text
+
+    # Split into sentences on common terminators followed by a space
+    sentences = re.split(r"(?<=[.!?])\s+", text.strip())
+    result = ""
+    for sentence in sentences:
+        candidate = (result + " " + sentence).strip() if result else sentence
+        if len(candidate) <= char_limit:
+            result = candidate
+        else:
+            break
+
+    if result:
+        return result
+
+    # No single sentence fits — fall back to word boundary
+    words = text.split()
+    result = ""
+    for word in words:
+        candidate = (result + " " + word).strip() if result else word
+        if len(candidate) <= char_limit:
+            result = candidate
+        else:
+            break
+    return result or text[:char_limit]
 
 
 def _fetch_context_string_via_tavily(movie_title: str) -> Optional[str]:
@@ -173,10 +209,14 @@ def _fetch_context_string_via_tavily(movie_title: str) -> Optional[str]:
             detected_genres = [g for g in genre_keywords if g in cleaned_lower]
             genres_str = ", ".join(detected_genres) if detected_genres else ""
 
-            # Strip reviewer attribution and boilerplate, then truncate to plot text
-            plot_text = _extract_plot_text(cleaned)
-            if not plot_text or plot_text == "N/A":
+            # Strip reviewer attribution and boilerplate from the full cleaned text
+            plot_text_full = _extract_plot_text(cleaned)
+            if not plot_text_full or plot_text_full == "N/A":
                 continue
+
+            # Truncate at a sentence boundary (not mid-sentence) to stay within
+            # the 512-token model limit while preserving complete semantic content.
+            plot_text = _truncate_to_char_limit(plot_text_full, char_limit=400)
 
             # Match the exact context string structure used when DB embeddings were
             # created (csv_batch_to_documents.py) so the vector lands in the same space.
