@@ -105,39 +105,7 @@ def _extract_plot_text(raw_text: str) -> str:
         for l in lines
         if len(l.strip()) > 40 or (l.strip() and not l.strip().isupper())
     ]
-    return " ".join(lines).strip()
-
-
-def _truncate_to_char_limit(text: str, char_limit: int = 400) -> str:
-    """
-    Truncates text to char_limit at a sentence boundary rather than mid-sentence.
-    Splits on ". ", "! ", "? " and accumulates complete sentences until the next
-    would exceed char_limit. Falls back to word boundary, then hard slice.
-    Preserves full semantic content that raw truncation would discard, while
-    keeping the total context string within the 512-token model limit.
-    """
-    if len(text) <= char_limit:
-        return text
-    sentences = re.split(r"(?<=[.!?])\s+", text.strip())
-    result = ""
-    for sentence in sentences:
-        candidate = (result + " " + sentence).strip() if result else sentence
-        if len(candidate) <= char_limit:
-            result = candidate
-        else:
-            break
-    if result:
-        return result
-    # No single sentence fits — fall back to word boundary
-    words = text.split()
-    result = ""
-    for word in words:
-        candidate = (result + " " + word).strip() if result else word
-        if len(candidate) <= char_limit:
-            result = candidate
-        else:
-            break
-    return result or text[:char_limit]
+    return " ".join(lines)[:800].strip()
 
 
 def _fetch_context_string_via_tavily(movie_title: str) -> Optional[str]:
@@ -205,13 +173,10 @@ def _fetch_context_string_via_tavily(movie_title: str) -> Optional[str]:
             detected_genres = [g for g in genre_keywords if g in cleaned_lower]
             genres_str = ", ".join(detected_genres) if detected_genres else ""
 
-            # Strip reviewer attribution and boilerplate from the full cleaned text
-            plot_text_full = _extract_plot_text(cleaned)
-            if not plot_text_full or plot_text_full == "N/A":
+            # Strip reviewer attribution and boilerplate, then truncate to plot text
+            plot_text = _extract_plot_text(cleaned)
+            if not plot_text or plot_text == "N/A":
                 continue
-            # Truncate at a sentence boundary (not mid-sentence) to stay within
-            # the 512-token model limit while preserving complete semantic content.
-            plot_text = _truncate_to_char_limit(plot_text_full, char_limit=400)
 
             # Match the exact context string structure used when DB embeddings were
             # created (csv_batch_to_documents.py) so the vector lands in the same space.
@@ -273,84 +238,12 @@ def _format_results(rows: List[Any]) -> str:
 
 
 # ── Recommender functions ──────────────────────────────────────────────────────
-def _fetch_vector_for_title(title: str, conn) -> tuple:
-    """
-    Shared helper: looks up a title's vector and genres from the DB.
-    Falls through to Tavily if the title is missing or has no plot.
-    Returns (vector, tconst_or_None, genres_list).
-    """
-    vector = None
-    tconst = None
-    genres = []
-
-    with conn.cursor() as cursor:
-        cursor.execute(
-            """
-            SELECT e.embedding, c.tconst,
-                   string_to_array(LOWER(c.genres), ', '),
-                   c.plot_summary
-            FROM embeddings_table e
-            JOIN cleaned_imdb c ON e.tconst = c.tconst
-            WHERE c.primarytitle ILIKE %s AND e.chunk_id = 0
-            LIMIT 1
-            """,
-            (title,),
-        )
-        row = cursor.fetchone()
-        if row:
-            db_embedding, db_tconst, db_genres, db_plot = row
-            tconst = db_tconst
-            genres = db_genres if db_genres else []
-            # Without register_vector, pgvector returns the embedding as a raw
-            # string "[0.1, 0.2, ...]". Parse it to a list so np.array() produces
-            # a proper float array rather than a 0-d string scalar.
-            if isinstance(db_embedding, str):
-                db_embedding = json.loads(db_embedding)
-            if db_plot and db_plot.strip():
-                vector = db_embedding
-            else:
-                print(
-                    f"[Recommender] '{title}' in DB but plot missing — fetching via Tavily."
-                )
-                context_string = _fetch_context_string_via_tavily(title)
-                if context_string:
-                    vecs = query_to_vectors([context_string])
-                    if vecs is not None and len(vecs) > 0 and vecs[0] is not None:
-                        vector = vecs[0]
-                if vector is None:
-                    vector = db_embedding  # fall back to plot-less embedding
-
-    if vector is None:
-        print(f"[Recommender] '{title}' not in DB — fetching plot via Tavily.")
-        context_string = _fetch_context_string_via_tavily(title)
-        if context_string:
-            vecs = query_to_vectors([context_string])
-            if vecs is not None and len(vecs) > 0 and vecs[0] is not None:
-                vector = vecs[0]
-            # Parse genres from the Tavily context string so they contribute to
-            # seed_genres even when the title isn't in the DB.
-            # Format: "Its genres are {genres_str}."
-            genres_match = re.search(r"Its genres are ([^.]+)\.", context_string)
-            if genres_match:
-                genres_text = genres_match.group(1).strip()
-                if genres_text:
-                    genres = [
-                        g.strip().lower() for g in genres_text.split(",") if g.strip()
-                    ]
-
-    return vector, tconst, genres
-
-
 def recommend_similar_to_movie(
-    movie_title: str,
-    filter_genres: Optional[List[str]] = None,
-    movie_title_2: Optional[str] = None,
+    movie_title: str, filter_genres: Optional[List[str]] = None
 ) -> str:
     """
-    Recommends movies using vector similarity.
-    Accepts one or two seed titles — if two are provided their vectors are
-    averaged so results blend both films' themes, genres and tone.
-    movie_title_2 is optional.
+    Recommends movies using vector similarity, leveraging the exact same subquery
+    and scalar intersection multiplier model used in recommend_from_preferences.
     """
     conn = None
     try:
@@ -361,44 +254,61 @@ def recommend_similar_to_movie(
             else psycopg2.connect(**config)
         )
 
-        # ── 1. Fetch vector + metadata for primary title ──
-        vector_1, tconst_1, genres_1 = _fetch_vector_for_title(movie_title, conn)
-        if vector_1 is None:
+        target_vector = None
+        exclude_tconst = None
+        seed_genres = []
+
+        # 1. Look up target movie metrics from the DB
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT e.embedding, c.tconst,
+                       string_to_array(LOWER(c.genres), ', '),
+                       c.plot_summary
+                FROM embeddings_table e
+                JOIN cleaned_imdb c ON e.tconst = c.tconst
+                WHERE c.primarytitle ILIKE %s AND e.chunk_id = 0
+                LIMIT 1
+                """,
+                (movie_title,),
+            )
+            row = cursor.fetchone()
+            if row:
+                db_embedding, db_tconst, db_genres, db_plot = row
+                exclude_tconst = db_tconst
+                seed_genres = db_genres if db_genres else []
+                if db_plot and db_plot.strip():
+                    # Good embedding with plot — use it directly
+                    target_vector = db_embedding
+                else:
+                    # In DB but plot_summary is missing — fetch via Tavily for a
+                    # richer embedding that includes plot content in the vector
+                    print(
+                        f"[Recommender] '{movie_title}' in DB but plot missing — fetching via Tavily."
+                    )
+                    context_string = _fetch_context_string_via_tavily(movie_title)
+                    if context_string:
+                        vecs = query_to_vectors([context_string])
+                        if vecs is not None and len(vecs) > 0 and vecs[0] is not None:
+                            target_vector = vecs[0]
+                    if target_vector is None:
+                        target_vector = (
+                            db_embedding  # fall back to existing plot-less embedding
+                        )
+
+        # 2. DB miss fallback (Tavily agent lookup)
+        if target_vector is None:
+            print(
+                f"[Recommender] '{movie_title}' not in DB — fetching plot via Tavily."
+            )
+            context_string = _fetch_context_string_via_tavily(movie_title)
+            if context_string:
+                vectors = query_to_vectors([context_string])
+                if vectors is not None and len(vectors) > 0 and vectors[0] is not None:
+                    target_vector = vectors[0]
+
+        if target_vector is None:
             return f"Error: Unable to generate a recommendation vector for '{movie_title}'."
-
-        # ── 2. Optionally fetch vector + metadata for second title and average ──
-        exclude_tconsts = [t for t in [tconst_1] if t]
-        exclude_titles = [movie_title]
-
-        two_title_mode = False
-        if movie_title_2 and movie_title_2.strip():
-            vector_2, tconst_2, genres_2 = _fetch_vector_for_title(movie_title_2, conn)
-            if vector_2 is not None:
-                # Mean the two vectors so results blend both films' themes and tone
-                v1 = (
-                    np.array(vector_1, dtype=float)
-                    if not isinstance(vector_1, np.ndarray)
-                    else vector_1.astype(float)
-                )
-                v2 = (
-                    np.array(vector_2, dtype=float)
-                    if not isinstance(vector_2, np.ndarray)
-                    else vector_2.astype(float)
-                )
-                target_vector = np.mean([v1, v2], axis=0).tolist()
-                if tconst_2:
-                    exclude_tconsts.append(tconst_2)
-                exclude_titles.append(movie_title_2)
-                # Merge genres from both titles (deduplicated)
-                seed_genres = list(dict.fromkeys(genres_1 + genres_2))
-                two_title_mode = True
-            else:
-                # Second title failed — fall back to primary only
-                target_vector = vector_1
-                seed_genres = genres_1
-        else:
-            target_vector = vector_1
-            seed_genres = genres_1
 
         vector_str = (
             "[" + ",".join(map(str, target_vector)) + "]"
@@ -407,6 +317,7 @@ def recommend_similar_to_movie(
         )
 
         # ── SYSTEMATIC PREFERENCE ALIGNMENT (SAME METHOD AS PREFERENCES) ──
+        # Determine target fallback genres if the database row didn't exist
         target_genres = (
             seed_genres
             if seed_genres
@@ -414,8 +325,9 @@ def recommend_similar_to_movie(
         )
 
         all_params = []
-        all_params.append(vector_str)
+        all_params.append(vector_str)  # Parameter for distance calculation
 
+        # Build the exact same inner_select design pattern
         inner_select = """
             SELECT c.tconst, c.primarytitle, c.genres, c.averagerating,
                    c.plot_summary, c.duration, c.plot_synopsis,
@@ -429,15 +341,14 @@ def recommend_similar_to_movie(
                     for _ in target_genres
                 ]
             )
-            # Two-title mode uses a stronger multiplier (0.4) because the averaged
-            # centroid is noisier — genre boost must overcome surface-level matches
-            # and pull results toward the thematic intersection of both seed films.
-            genre_multiplier = 0.4 if two_title_mode else 0.15
-            inner_select += f", (1.0 + {genre_multiplier} * ({genre_score_cases})) AS intersection_multiplier"
+            inner_select += (
+                f", (1.0 + 0.15 * ({genre_score_cases})) AS intersection_multiplier"
+            )
             all_params.extend([f"%{g}%" for g in target_genres])
         else:
             inner_select += ", 1.0 AS intersection_multiplier"
 
+        # Build the matching inner_from_where constraints
         inner_from_where = """
             FROM embeddings_table e
             JOIN cleaned_imdb c ON e.tconst = c.tconst
@@ -447,21 +358,16 @@ def recommend_similar_to_movie(
               AND c.averagerating >= 4.5
         """
 
-        # Exclude both seed titles from results by tconst and by title string
-        if exclude_tconsts:
-            inner_from_where += (
-                f" AND c.tconst NOT IN ({','.join(['%s'] * len(exclude_tconsts))})"
-            )
-            all_params.extend(exclude_tconsts)
+        if exclude_tconst:
+            inner_from_where += " AND c.tconst != %s"
+            all_params.append(exclude_tconst)
 
-        # Use NOT ILIKE with wildcard so apostrophe/encoding variants
-        # (e.g. curly ' vs straight ') don't bypass the exclusion filter
-        for t in exclude_titles:
-            inner_from_where += " AND c.primarytitle NOT ILIKE %s"
-            all_params.append(f"%{t}%")
+        inner_from_where += " AND LOWER(c.primarytitle) != LOWER(%s)"
+        all_params.append(movie_title)
 
+        # Mirroring the preference routine's exact derived subquery table wrapping logic
         full_query = f"""
-            SELECT tconst, primarytitle, genres, averagerating,
+            SELECT tconst, primarytitle, genres, averagerating, 
                    plot_summary, duration, plot_synopsis, distance
             FROM (
                 {inner_select}
@@ -474,6 +380,7 @@ def recommend_similar_to_movie(
         else:
             full_query += " ORDER BY distance ASC LIMIT 5"
 
+        # Execute query with cleanly built parameter pipeline
         with conn.cursor() as cursor:
             cursor.execute(full_query, tuple(all_params))
             movie_recs = cursor.fetchall()
