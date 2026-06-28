@@ -342,7 +342,7 @@ def recommend_similar_to_movie(
                 ]
             )
             inner_select += (
-                f", (1.0 + 0.15 * ({genre_score_cases})) AS intersection_multiplier"
+                f", (1.0 + 0.4 * ({genre_score_cases})) AS intersection_multiplier"
             )
             all_params.extend([f"%{g}%" for g in target_genres])
         else:
@@ -355,15 +355,27 @@ def recommend_similar_to_movie(
             WHERE e.chunk_id = 0
               AND c.plot_summary IS NOT NULL
               AND c.plot_summary != ''
-              AND c.averagerating >= 4.5
+              AND c.averagerating >= 6.5
+              AND c.numvotes >= 5000
         """
 
         if exclude_tconst:
             inner_from_where += " AND c.tconst != %s"
             all_params.append(exclude_tconst)
 
-        inner_from_where += " AND LOWER(c.primarytitle) != LOWER(%s)"
-        all_params.append(movie_title)
+        # NOT ILIKE with wildcard handles apostrophe/encoding variants
+        inner_from_where += " AND c.primarytitle NOT ILIKE %s"
+        all_params.append(f"%{movie_title}%")
+
+        # Hard genre overlap: require results to share at least one genre with the
+        # seed movie. Prevents semantic bleeding where physics vocabulary in
+        # Oppenheimer matches sci-fi films that share no actual genre DNA.
+        if target_genres:
+            genre_overlap_clauses = " OR ".join(
+                ["c.genres ILIKE %s" for _ in target_genres]
+            )
+            inner_from_where += f" AND ({genre_overlap_clauses})"
+            all_params.extend([f"%{g}%" for g in target_genres])
 
         # Mirroring the preference routine's exact derived subquery table wrapping logic
         full_query = f"""
