@@ -327,6 +327,16 @@ def _fetch_vector_for_title(title: str, conn) -> tuple:
             vecs = query_to_vectors([context_string])
             if vecs is not None and len(vecs) > 0 and vecs[0] is not None:
                 vector = vecs[0]
+            # Parse genres from the Tavily context string so they contribute to
+            # seed_genres even when the title isn't in the DB.
+            # Format: "Its genres are {genres_str}."
+            genres_match = re.search(r"Its genres are ([^.]+)\.", context_string)
+            if genres_match:
+                genres_text = genres_match.group(1).strip()
+                if genres_text:
+                    genres = [
+                        g.strip().lower() for g in genres_text.split(",") if g.strip()
+                    ]
 
     return vector, tconst, genres
 
@@ -360,10 +370,11 @@ def recommend_similar_to_movie(
         exclude_tconsts = [t for t in [tconst_1] if t]
         exclude_titles = [movie_title]
 
+        two_title_mode = False
         if movie_title_2 and movie_title_2.strip():
             vector_2, tconst_2, genres_2 = _fetch_vector_for_title(movie_title_2, conn)
             if vector_2 is not None:
-                # Mean the two vectors so results blend both films
+                # Mean the two vectors so results blend both films' themes and tone
                 v1 = (
                     np.array(vector_1, dtype=float)
                     if not isinstance(vector_1, np.ndarray)
@@ -380,6 +391,7 @@ def recommend_similar_to_movie(
                 exclude_titles.append(movie_title_2)
                 # Merge genres from both titles (deduplicated)
                 seed_genres = list(dict.fromkeys(genres_1 + genres_2))
+                two_title_mode = True
             else:
                 # Second title failed — fall back to primary only
                 target_vector = vector_1
@@ -417,9 +429,11 @@ def recommend_similar_to_movie(
                     for _ in target_genres
                 ]
             )
-            inner_select += (
-                f", (1.0 + 0.15 * ({genre_score_cases})) AS intersection_multiplier"
-            )
+            # Two-title mode uses a stronger multiplier (0.4) because the averaged
+            # centroid is noisier — genre boost must overcome surface-level matches
+            # and pull results toward the thematic intersection of both seed films.
+            genre_multiplier = 0.4 if two_title_mode else 0.15
+            inner_select += f", (1.0 + {genre_multiplier} * ({genre_score_cases})) AS intersection_multiplier"
             all_params.extend([f"%{g}%" for g in target_genres])
         else:
             inner_select += ", 1.0 AS intersection_multiplier"
@@ -440,9 +454,11 @@ def recommend_similar_to_movie(
             )
             all_params.extend(exclude_tconsts)
 
+        # Use NOT ILIKE with wildcard so apostrophe/encoding variants
+        # (e.g. curly ' vs straight ') don't bypass the exclusion filter
         for t in exclude_titles:
-            inner_from_where += " AND LOWER(c.primarytitle) != LOWER(%s)"
-            all_params.append(t)
+            inner_from_where += " AND c.primarytitle NOT ILIKE %s"
+            all_params.append(f"%{t}%")
 
         full_query = f"""
             SELECT tconst, primarytitle, genres, averagerating,
