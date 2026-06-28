@@ -41,14 +41,80 @@ def _clean_web_text(text: str) -> str:
     return text.strip()
 
 
+def _extract_duration(text: str) -> str:
+    """Extracts runtime from raw web text. Returns e.g. '1h 55m' or '' if not found."""
+    patterns = [
+        (
+            r"(\d+)\s*h(?:r|our)?s?\s*(\d+)\s*m(?:in)?",
+            lambda m: f"{m.group(1)}h {m.group(2)}m",
+        ),
+        (r"(\d+)\s*h(?:r|our)?s?", lambda m: f"{m.group(1)}h"),
+        (r"(\d{2,3})\s*m(?:in(?:ute)?s?)?", lambda m: f"{m.group(1)}m"),
+    ]
+    text_lower = text.lower()
+    for pattern, fmt in patterns:
+        match = re.search(pattern, text_lower)
+        if match:
+            return fmt(match)
+    return ""
+
+
+def _extract_rating(text: str) -> str:
+    """Extracts a /10 rating from raw web text. Returns e.g. '7.5' or 'N/A'."""
+    patterns = [
+        r"(\d+\.?\d*)\s*/\s*10",
+        r"(\d+\.?\d*)\s*out\s*of\s*10",
+        r"imdb[^\d]*(\d+\.?\d*)",
+        r"rating[:\s]+(\d+\.?\d*)",
+    ]
+    text_lower = text.lower()
+    for pattern in patterns:
+        match = re.search(pattern, text_lower)
+        if match:
+            try:
+                val = float(match.group(1))
+                if 1.0 <= val <= 10.0:
+                    return f"{val:.1f}"
+            except ValueError:
+                continue
+    return "N/A"
+
+
+def _extract_plot_text(raw_text: str) -> str:
+    """
+    Strips reviewer attribution, navigation boilerplate, and cast/crew bylines
+    from raw web content, returning only plot-relevant sentences.
+    """
+    # Remove "Written by X", "Reviewed by X", "By X" attribution lines
+    raw_text = re.sub(
+        r"(?i)(?:written|reviewed?|contributed?|edited?|summarized?)\s+by\s+[A-Z][a-zA-Z\s]{2,40}",
+        "",
+        raw_text,
+    )
+    # Remove trailing em-dash bylines: "— John Smith" or "- Jane Doe"
+    raw_text = re.sub(
+        r"[\u2014\u2013-]\s*[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+\s*$",
+        "",
+        raw_text,
+        flags=re.MULTILINE,
+    )
+    # Remove lines that are purely navigation/metadata (very short or all-caps)
+    lines = raw_text.split("\n")
+    lines = [
+        l
+        for l in lines
+        if len(l.strip()) > 40 or (l.strip() and not l.strip().isupper())
+    ]
+    return " ".join(lines)[:800].strip()
+
+
 def _fetch_context_string_via_tavily(movie_title: str) -> Optional[str]:
     """
-    Fetches a movie's plot from IMDB via Tavily and formats it into the same
-    context string structure used when the DB embeddings were created:
-
-        "Its primary title is {title}. Its plot summary is: '{plot_text}'."
-
-    This ensures the generated embedding lands in the same vector space as the DB.
+    Fetches plot, genre, duration and rating for any title (movie, TV series,
+    documentary) from the open web via Tavily — not restricted to IMDB.
+    Formats the result into the exact same context string structure used when
+    DB embeddings were created (csv_batch_to_documents.py), so the generated
+    embedding lands in the same vector space as existing DB rows.
     Returns None if the fetch fails or returns no usable content.
     """
     if not TAVILY_API_KEY:
@@ -57,45 +123,74 @@ def _fetch_context_string_via_tavily(movie_title: str) -> Optional[str]:
     try:
         tavily_client = TavilyClient(api_key=TAVILY_API_KEY)
 
-        # IMPROVEMENT 1: Anchor the query explicitly to avoid raw literal translations
-        # appending "synopsis plot summary" directs the API to structured movie profiles.
-        refined_query = f'"{movie_title}" movie synopsis plot summary site:imdb.com'
+        # Open-web query — no site restriction so recent TV series, documentaries,
+        # and titles missing from IMDB are found on Wikipedia, streaming sites, etc.
+        refined_query = f'"{movie_title}" plot summary synopsis genres runtime rating'
 
         search_response = tavily_client.search(
             query=refined_query,
             search_depth="advanced",
-            max_results=2,
+            max_results=3,
             include_raw_content=True,
         )
         if not search_response or "results" not in search_response:
             return None
 
         for res in search_response["results"]:
-            url = res.get("url", "")
-            if "imdb.com/list/" in url:
-                continue  # Skip generic IMDB list pages, same as find_movie_tool.py
             raw = res.get("raw_content", res.get("content", ""))
             if not raw:
                 continue
 
-            # Clean HTML, then take enough text to cover plot summary + early synopsis.
-            plot_text = _clean_web_text(raw)[:800]
+            # Strip HTML tags and collapse whitespace first
+            cleaned = _clean_web_text(raw)
+
+            # Extract structured fields before truncating
+            duration_str = _extract_duration(cleaned)
+            rating_str = _extract_rating(cleaned)
+
+            # Extract genre hints from the full cleaned text
+            genre_keywords = [
+                "action",
+                "adventure",
+                "animation",
+                "animated",
+                "comedy",
+                "crime",
+                "documentary",
+                "drama",
+                "fantasy",
+                "horror",
+                "mystery",
+                "romance",
+                "sci-fi",
+                "science fiction",
+                "thriller",
+                "western",
+                "musical",
+                "family",
+            ]
+            cleaned_lower = cleaned.lower()
+            detected_genres = [g for g in genre_keywords if g in cleaned_lower]
+            genres_str = ", ".join(detected_genres) if detected_genres else ""
+
+            # Strip reviewer attribution and boilerplate, then truncate to plot text
+            plot_text = _extract_plot_text(cleaned)
             if not plot_text or plot_text == "N/A":
                 continue
 
-            # IMPROVEMENT 2: Establish a structural context anchor in the string itself.
-            # If a title is highly abstract, adding a neutral cinematic identifier ("feature film narrative")
-            # grounds the vector embedding back into standard storytelling frameworks instead of letting
-            # the embedding engine interpret the title as a raw literal disaster scenario.
+            # Match the exact context string structure used when DB embeddings were
+            # created (csv_batch_to_documents.py) so the vector lands in the same space.
             context_string = (
                 f"Item Id: unknown is a movie. "
                 f"Its primary title is {movie_title}, "
                 f"its original title is {movie_title}. "
-                f"This feature film narrative details the following events. "
+                f"Its genres are {genres_str}. "
+                f"Its duration is {duration_str} long, and has an average rating of {rating_str}. "
                 f"Its plot summary is: '{plot_text}'. "
             )
             print(
-                f"[Tavily] Built context string for '{movie_title}' ({len(context_string)} chars)."
+                f"[Tavily] Built context string for '{movie_title}' "
+                f"(genres={genres_str!r}, duration={duration_str!r}, rating={rating_str})."
             )
             return context_string
 
@@ -158,7 +253,9 @@ def recommend_similar_to_movie(
         with conn.cursor() as cursor:
             cursor.execute(
                 """
-                SELECT e.embedding, c.tconst, string_to_array(LOWER(c.genres), ', ')
+                SELECT e.embedding, c.tconst,
+                       string_to_array(LOWER(c.genres), ', '),
+                       c.plot_summary
                 FROM embeddings_table e
                 JOIN cleaned_imdb c ON e.tconst = c.tconst
                 WHERE c.primarytitle ILIKE %s AND e.chunk_id = 0
@@ -168,9 +265,27 @@ def recommend_similar_to_movie(
             )
             row = cursor.fetchone()
             if row:
-                target_vector = row[0]
-                exclude_tconst = row[1]
-                seed_genres = row[2] if row[2] else []
+                db_embedding, db_tconst, db_genres, db_plot = row
+                exclude_tconst = db_tconst
+                seed_genres = db_genres if db_genres else []
+                if db_plot and db_plot.strip():
+                    # Good embedding with plot — use it directly
+                    target_vector = db_embedding
+                else:
+                    # In DB but plot_summary is missing — fetch via Tavily for a
+                    # richer embedding that includes plot content in the vector
+                    print(
+                        f"[Recommender] '{movie_title}' in DB but plot missing — fetching via Tavily."
+                    )
+                    context_string = _fetch_context_string_via_tavily(movie_title)
+                    if context_string:
+                        vecs = query_to_vectors([context_string])
+                        if vecs is not None and len(vecs) > 0 and vecs[0] is not None:
+                            target_vector = vecs[0]
+                    if target_vector is None:
+                        target_vector = (
+                            db_embedding  # fall back to existing plot-less embedding
+                        )
 
         # 2. DB miss fallback (Tavily agent lookup)
         if target_vector is None:
@@ -218,7 +333,7 @@ def recommend_similar_to_movie(
                 ]
             )
             inner_select += (
-                f", (1.0 + 0.4 * ({genre_score_cases})) AS intersection_multiplier"
+                f", (1.0 + 0.15 * ({genre_score_cases})) AS intersection_multiplier"
             )
             all_params.extend([f"%{g}%" for g in target_genres])
         else:
@@ -299,7 +414,7 @@ def recommend_from_preferences(user_id: int) -> str:
                 for title in prefs.movie_interests_titles:
                     cursor.execute(
                         """
-                        SELECT e.embedding, c.tconst
+                        SELECT e.embedding, c.tconst, c.plot_summary
                         FROM embeddings_table e
                         JOIN cleaned_imdb c ON e.tconst = c.tconst
                         WHERE LOWER(c.primarytitle) = LOWER(%s)
@@ -310,9 +425,39 @@ def recommend_from_preferences(user_id: int) -> str:
                     )
                     row = cursor.fetchone()
                     if row:
-                        emb = json.loads(row[0]) if isinstance(row[0], str) else row[0]
-                        vectors_list.append(np.array(emb))
-                        exclude_tconsts.append(row[1])
+                        db_emb, db_tconst, db_plot = row
+                        exclude_tconsts.append(db_tconst)
+                        if db_plot and db_plot.strip():
+                            # Good embedding with plot — use it directly
+                            emb = (
+                                json.loads(db_emb)
+                                if isinstance(db_emb, str)
+                                else db_emb
+                            )
+                            vectors_list.append(np.array(emb))
+                        else:
+                            # In DB but plot_summary is missing — fetch via Tavily
+                            # for a richer embedding that includes plot content
+                            print(
+                                f"[Recommender] '{title}' in DB but plot missing — fetching via Tavily."
+                            )
+                            context_string = _fetch_context_string_via_tavily(title)
+                            if context_string:
+                                vecs = query_to_vectors([context_string])
+                                if (
+                                    vecs is not None
+                                    and len(vecs) > 0
+                                    and vecs[0] is not None
+                                ):
+                                    vectors_list.append(np.array(vecs[0]))
+                            else:
+                                # Fall back to existing plot-less embedding rather than dropping it
+                                emb = (
+                                    json.loads(db_emb)
+                                    if isinstance(db_emb, str)
+                                    else db_emb
+                                )
+                                vectors_list.append(np.array(emb))
                     else:
                         print(
                             f"[Recommender] '{title}' not in DB — fetching plot via Tavily."
@@ -355,7 +500,7 @@ def recommend_from_preferences(user_id: int) -> str:
                 ]
             )
             inner_select += (
-                f", (1.0 + 0.5 * ({genre_score_cases})) AS intersection_multiplier"
+                f", (1.0 + 1.5 * ({genre_score_cases})) AS intersection_multiplier"
             )
             all_params.extend([f"%{g}%" for g in prefs.liked_genres])
         else:
@@ -376,11 +521,19 @@ def recommend_from_preferences(user_id: int) -> str:
             )
             all_params.extend(exclude_tconsts)
 
-        # NOTE: genre is intentionally NOT added as a hard WHERE filter here.
-        # liked_genres already boosts matching movies via intersection_multiplier in
-        # the ORDER BY. A hard filter would exclude all results when the user's
-        # preferred movie titles (e.g. Tomb Raider, Obsession) pull the mean vector
-        # into a different genre space than liked_genres (e.g. animated).
+        # Exclude by ILIKE on each seed title to catch partial matches
+        # (e.g. "Lara Croft: Tomb Raider" when seed title is "tomb raider")
+        if prefs.movie_interests_titles:
+            title_exclusions = " AND ".join(
+                ["c.primarytitle NOT ILIKE %s" for _ in prefs.movie_interests_titles]
+            )
+            inner_from_where += f" AND ({title_exclusions})"
+            all_params.extend([f"%{t}%" for t in prefs.movie_interests_titles])
+
+        # NOTE: liked_genres is NOT added as a hard WHERE filter — it boosts via
+        # intersection_multiplier in ORDER BY instead. A hard filter would exclude
+        # all results when the mean vector (from e.g. Tomb Raider + Obsession) points
+        # into a different genre space than liked_genres.
 
         # ── THE DECISIVE FIX: WRAP INTO A SUBQUERY Derived Table ──
         # Wrapping ensures that 'distance' and 'intersection_multiplier' are fully calculated
