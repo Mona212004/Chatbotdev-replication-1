@@ -19,26 +19,16 @@ orig_completion = litellm.completion
 
 
 def fix_json_arguments(args_str):
-    """Safely converts string arguments into list arrays if a model misformats them,
-    and strips out serialized 'None'/'none'/'null' string values from list fields."""
+    """Safely converts string arguments into list arrays if a model misformats them."""
     if not args_str or not isinstance(args_str, str):
         return args_str
     try:
         data = json.loads(args_str)
         if isinstance(data, dict):
+            # Enforce array types on array fields
             for field in ["movie_interests_titles", "liked_genres"]:
-                if field in data:
-                    # Coerce bare string to list
-                    if isinstance(data[field], str):
-                        data[field] = [data[field]]
-                    # Strip serialized None values the model passes when it means "no value"
-                    if isinstance(data[field], list):
-                        data[field] = [
-                            v
-                            for v in data[field]
-                            if isinstance(v, str)
-                            and v.strip().lower() not in ("none", "null", "")
-                        ]
+                if field in data and isinstance(data[field], str):
+                    data[field] = [data[field]]
             return json.dumps(data)
     except Exception:
         pass
@@ -273,6 +263,31 @@ async def chat(request: Request):
             )
 
         content = types.Content(role="user", parts=[types.Part(text=user_message)])
+
+        # Trim session history to the last 10 turns to stay within Groq's 8k TPM
+        # limit. The AUTH_SUCCESS line is always kept so the agent retains the
+        # user ID regardless of how far back it occurred.
+        session = await session_service.get_session(
+            app_name="movie_rec_app",
+            user_id="default_web_user",
+            session_id=GLOBAL_SESSION_ID,
+        )
+        if session and hasattr(session, "events") and len(session.events) > 20:
+            auth_events = [
+                e
+                for e in session.events
+                if e.content
+                and e.content.parts
+                and any(
+                    "AUTH_SUCCESS" in (p.text or "") for p in e.content.parts if p.text
+                )
+            ]
+            recent_events = session.events[-20:]
+            # Ensure AUTH_SUCCESS events are always included
+            for e in auth_events:
+                if e not in recent_events:
+                    recent_events.insert(0, e)
+            session.events = recent_events
 
         events_async = runner.run_async(
             session_id=GLOBAL_SESSION_ID,
