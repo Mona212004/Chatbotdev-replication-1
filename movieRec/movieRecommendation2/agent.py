@@ -76,20 +76,6 @@ if LLM_PROVIDER == "groq":
             "reasoning_format": "hidden"
         },  # reasoning_format isn't a real openai SDK kwarg, so it has to go through extra_body to reach Groq's raw request body
     )
-elif LLM_PROVIDER == "openrouter":
-    # OpenRouter: higher TPM/TPD limits than Groq free tier.
-    # Set ROOT_MODEL in Render env vars e.g. "qwen/qwen3-235b-a22b" or "qwen/qwen3-30b-a3b"
-    active_model = os.getenv("ROOT_MODEL", "qwen/qwen3-235b-a22b")
-    llm_instance = LiteLlm(
-        model=active_model,
-        api_base="https://openrouter.ai/api/v1",
-        api_key=os.getenv("OPENROUTER_API_KEY"),
-        custom_llm_provider="openai",
-        temperature=0,
-        extra_body={
-            "reasoning": {"effort": "disabled"}
-        },  # disables Qwen3 thinking mode on OpenRouter
-    )
 else:
     # Keeps your local setup working exactly as it is now
     from .test_models import root_model
