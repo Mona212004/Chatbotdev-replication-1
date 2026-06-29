@@ -356,7 +356,6 @@ def recommend_similar_to_movie(
               AND c.plot_summary IS NOT NULL
               AND c.plot_summary != ''
               AND c.averagerating >= 6.5
-              AND c.numvotes >= 5000
         """
 
         if exclude_tconst:
