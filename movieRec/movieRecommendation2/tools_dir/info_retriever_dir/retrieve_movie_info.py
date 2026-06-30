@@ -125,6 +125,36 @@ def _truncate_at_sentence(text: str, char_limit: int = 400) -> str:
     return result or text[:char_limit]
 
 
+def _is_low_quality_plot(text: str) -> bool:
+    """
+    Detects marketing/promotional text (release announcements, trailer blurbs,
+    producer credits) that isn't an actual plot description. Returns True if
+    the text should be rejected in favor of trying the next search result.
+    """
+    marketing_markers = [
+        "hits theaters",
+        "in theaters",
+        "official trailer",
+        "release date:",
+        "directed by",
+        "produced by",
+        "executive producer",
+        "starring",
+        "coming soon",
+        "watch the trailer",
+        "tickets now",
+        "rotten tomatoes",
+        "box office",
+        "now playing",
+        "★",
+    ]
+    text_lower = text.lower()
+    marker_hits = sum(1 for m in marketing_markers if m in text_lower)
+    # Reject if 2+ marketing markers appear — a real plot summary won't have
+    # "directed by" + "produced by" + "release date" clustered together.
+    return marker_hits >= 2
+
+
 def _strip_attribution(text: str) -> str:
     """Remove 'Written by X', bylines, and boilerplate from plot text."""
     text = re.sub(r"(?i)(?:written|reviewed?|edited?)\s+by\s+[\w\s]{2,40}", "", text)
@@ -154,26 +184,35 @@ def _fetch_movie_info_via_tavily(movie_title: str) -> dict:
     try:
         client = TavilyClient(api_key=TAVILY_API_KEY)
         response = client.search(
-            query=f'"{movie_title}" plot summary genres runtime rating cast',
+            query=f'"{movie_title}" movie plot summary wikipedia',
             search_depth="advanced",
-            max_results=3,
+            max_results=5,
             include_raw_content=True,
         )
         if not response or "results" not in response:
             return None
 
-        for res in response["results"]:
-            # Prefer Tavily's pre-extracted content snippet (already stripped of
-            # nav/menus/logos). Only fall back to raw_content if too short.
+        results = response["results"]
+        # Two-pass: prefer wikipedia.org results first (reliably has real plot
+        # summaries), then fall back to any other non-marketing result.
+        wiki_results = [r for r in results if "wikipedia.org" in r.get("url", "")]
+        other_results = [r for r in results if "wikipedia.org" not in r.get("url", "")]
+
+        for res in wiki_results + other_results:
             snippet = res.get("content", "")
             raw_full = res.get("raw_content", "")
             raw = snippet if snippet and len(snippet) > 150 else (raw_full or snippet)
             if not raw:
                 continue
             cleaned = _clean_web_text(raw)
+
+            # Skip marketing/promotional pages (trailers, release announcements)
+            if _is_low_quality_plot(cleaned):
+                continue
+
             plot_raw = _strip_attribution(cleaned)
             plot_summary = _truncate_at_sentence(plot_raw, char_limit=400)
-            if not plot_summary:
+            if not plot_summary or _is_low_quality_plot(plot_summary):
                 continue
 
             return {
