@@ -264,27 +264,51 @@ async def chat(request: Request):
 
         content = types.Content(role="user", parts=[types.Part(text=user_message)])
 
-        # Trim session history to the last 10 turns to stay within Groq's 8k TPM
-        # limit. The AUTH_SUCCESS line is always kept so the agent retains the
-        # user ID regardless of how far back it occurred.
+        # Trim session history to stay within Groq's 8k TPM limit. Two-part strategy:
+        # 1. Strip heavy content (recommendation lists, get_movie_info dumps, find_movie_title
+        #    results) from older events — these are large but not needed for the agent to
+        #    remember who the user is or what they like. Always keep AUTH_SUCCESS and
+        #    preference confirmations intact, regardless of age, since the agent needs
+        #    user_id/username/preferences for correct routing on every turn.
+        # 2. Cap total events to the last 12 turns as a hard ceiling.
+        HEAVY_MARKERS = [
+            "Match Confidence", "Core Premise", "Plot Summary", "Plot Synopsis",
+            "🎬", "Candidate #", "you're looking for is",
+        ]
+        LIGHT_MARKERS = [
+            "AUTH_SUCCESS", "preferences for user ID", "preferences have been",
+            "preferences are:", "removed",
+        ]
+
+        def _is_heavy(event) -> bool:
+            if not (event.content and event.content.parts):
+                return False
+            for p in event.content.parts:
+                if p.text and any(m in p.text for m in HEAVY_MARKERS):
+                    return True
+            return False
+
+        def _is_light(event) -> bool:
+            if not (event.content and event.content.parts):
+                return False
+            for p in event.content.parts:
+                if p.text and any(m in p.text for m in LIGHT_MARKERS):
+                    return True
+            return False
+
         session = await session_service.get_session(
             app_name="movie_rec_app",
             user_id="default_web_user",
             session_id=GLOBAL_SESSION_ID,
         )
-        if session and hasattr(session, "events") and len(session.events) > 20:
-            auth_events = [
-                e
-                for e in session.events
-                if e.content
-                and e.content.parts
-                and any(
-                    "AUTH_SUCCESS" in (p.text or "") for p in e.content.parts if p.text
-                )
-            ]
-            recent_events = session.events[-20:]
-            # Ensure AUTH_SUCCESS events are always included
-            for e in auth_events:
+        if session and hasattr(session, "events") and len(session.events) > 12:
+            light_events = [e for e in session.events if _is_light(e)]
+            recent_events = session.events[-12:]
+            # Drop heavy recommendation/search-result events from the recent window
+            # too — they're large and not needed for the agent to keep context.
+            recent_events = [e for e in recent_events if not _is_heavy(e)]
+            # Always keep light (auth/preference) events even if older than the window
+            for e in light_events:
                 if e not in recent_events:
                     recent_events.insert(0, e)
             session.events = recent_events
