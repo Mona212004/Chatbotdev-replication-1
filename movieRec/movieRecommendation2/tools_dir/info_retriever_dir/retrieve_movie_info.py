@@ -383,22 +383,25 @@ def get_movie_info(movie_title: str) -> str:
         for idx, row in enumerate(rows, 1):
             title, genres, rating, summary, duration, synopsis = row
 
+            # .* (with DOTALL) matches any trailing characters including emails
+            # like "<name@email.com>" that [\w\s]* couldn't match, which had
+            # silently failed to strip anything when an email followed "Written by".
             clean_summary_raw = (
                 re.sub(
-                    r"\s*Written\s+by\s+[\w\s]*$",
+                    r"\s*Written\s+by\s+.*$",
                     "",
                     summary or "",
-                    flags=re.IGNORECASE,
+                    flags=re.IGNORECASE | re.DOTALL,
                 ).strip()
                 if summary
                 else ""
             )
             clean_synopsis_raw = (
                 re.sub(
-                    r"\s*Written\s+by\s+[\w\s]*$",
+                    r"\s*Written\s+by\s+.*$",
                     "",
                     synopsis or "",
-                    flags=re.IGNORECASE,
+                    flags=re.IGNORECASE | re.DOTALL,
                 ).strip()
                 if synopsis
                 else ""
