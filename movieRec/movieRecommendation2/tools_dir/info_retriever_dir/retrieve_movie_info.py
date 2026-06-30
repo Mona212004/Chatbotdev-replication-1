@@ -192,6 +192,40 @@ def _is_low_quality_plot(text: str) -> bool:
     return marketing_hits >= 2 or commentary_hits >= 1
 
 
+def _normalize_title(title: str) -> str:
+    """Strip parenthetical qualifiers (year, '(film)', etc.) and punctuation
+    for loose title comparison."""
+    title = re.sub(r"\(.*?\)", "", title)  # remove (2019 film), (TV series), etc.
+    title = re.sub(r"[^\w\s]", "", title)  # strip punctuation
+    return " ".join(title.lower().split())
+
+
+def _result_title_matches(result_title: str, query_title: str) -> bool:
+    """
+    Verifies a search result's actual page title matches the requested movie,
+    rather than just containing it as a substring. Prevents mismatches like
+    "Secret Obsession" (2019) being accepted for a search of "Obsession".
+    Strips a trailing 4-digit year from query_title before comparing, since
+    user-typed titles often include a release year that isn't part of the
+    real title (e.g. "Obsession 2026" -> "Obsession").
+    """
+    if not result_title:
+        return False
+    query_core = re.sub(r"\s*\b(19|20)\d{2}\b\s*$", "", query_title).strip()
+    norm_result = _normalize_title(result_title)
+    norm_query = _normalize_title(query_core)
+    if not norm_query:
+        return False
+    # Exact match, or result title starts with the query title as whole words
+    # (handles "Obsession" matching "Obsession (2026 film)" but not
+    # "Secret Obsession" or "Obsession 2" etc.)
+    if norm_result == norm_query:
+        return True
+    result_words = norm_result.split()
+    query_words = norm_query.split()
+    return result_words[: len(query_words)] == query_words
+
+
 def _fetch_plot_via_tavily(movie_title: str) -> str:
     """
     Fetches just the plot description, biased toward Wikipedia which reliably
@@ -220,6 +254,13 @@ def _fetch_plot_via_tavily(movie_title: str) -> str:
             results = response.get("results", []) if response else []
 
         for res in results:
+            # Reject results whose actual page title doesn't match the requested
+            # movie — prevents accepting plots from similarly-named but different
+            # films (e.g. "Secret Obsession" when searching "Obsession").
+            result_title = res.get("title", "")
+            if not _result_title_matches(result_title, movie_title):
+                continue
+
             snippet = res.get("content", "")
             raw_full = res.get("raw_content", "")
             raw = snippet if snippet and len(snippet) > 150 else (raw_full or snippet)
@@ -258,6 +299,9 @@ def _fetch_metadata_via_tavily(movie_title: str) -> dict:
         results = response.get("results", []) if response else []
         combined_text = ""
         for res in results:
+            result_title = res.get("title", "")
+            if not _result_title_matches(result_title, movie_title):
+                continue
             snippet = res.get("content", "")
             raw_full = res.get("raw_content", "")
             raw = snippet if snippet and len(snippet) > 80 else (raw_full or snippet)
