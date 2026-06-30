@@ -64,10 +64,14 @@ def _extract_duration_from_text(text: str) -> str:
         text,
         [
             (
-                r"(\d+)\s*h(?:r|our)?s?\s*(\d+)\s*m(?:in)?",
+                r"(?<!\d)(\d{1,2})\s*h(?:r|our)?s?\s*(\d{1,2})\s*m(?:in)?(?!\d)",
                 lambda m: f"{m.group(1)}h {m.group(2)}min",
             ),
             (r"(?<!\d)(\d{1,2})(?!\d)\s*h(?:r|our)?s?", lambda m: f"{m.group(1)}h"),
+            (
+                r"runtime[:\s]+(?<!\d)(\d{2,3})(?!\d)\s*m(?:in(?:ute)?s?)?",
+                lambda m: f"{m.group(1)}min",
+            ),
             (
                 r"(?<!\d)(\d{2,3})(?!\d)\s*m(?:in(?:ute)?s?)?",
                 lambda m: f"{m.group(1)}min",
@@ -81,9 +85,9 @@ def _extract_rating_from_text(text: str) -> str:
     result = _extract_field(
         text,
         [
+            (r"imdb[^\d]{0,15}(\d+\.?\d*)\s*/\s*10", lambda m: m.group(1)),
             (r"(\d+\.?\d*)\s*/\s*10", lambda m: m.group(1)),
             (r"(\d+\.?\d*)\s*out\s*of\s*10", lambda m: m.group(1)),
-            (r"imdb[^\d]*(\d+\.?\d*)", lambda m: m.group(1)),
             (r"rating[:\s]+(\d+\.?\d*)", lambda m: m.group(1)),
         ],
     )
@@ -125,36 +129,6 @@ def _truncate_at_sentence(text: str, char_limit: int = 400) -> str:
     return result or text[:char_limit]
 
 
-def _is_low_quality_plot(text: str) -> bool:
-    """
-    Detects marketing/promotional text (release announcements, trailer blurbs,
-    producer credits) that isn't an actual plot description. Returns True if
-    the text should be rejected in favor of trying the next search result.
-    """
-    marketing_markers = [
-        "hits theaters",
-        "in theaters",
-        "official trailer",
-        "release date:",
-        "directed by",
-        "produced by",
-        "executive producer",
-        "starring",
-        "coming soon",
-        "watch the trailer",
-        "tickets now",
-        "rotten tomatoes",
-        "box office",
-        "now playing",
-        "★",
-    ]
-    text_lower = text.lower()
-    marker_hits = sum(1 for m in marketing_markers if m in text_lower)
-    # Reject if 2+ marketing markers appear — a real plot summary won't have
-    # "directed by" + "produced by" + "release date" clustered together.
-    return marker_hits >= 2
-
-
 def _strip_attribution(text: str) -> str:
     """Remove 'Written by X', bylines, and boilerplate from plot text."""
     text = re.sub(r"(?i)(?:written|reviewed?|edited?)\s+by\s+[\w\s]{2,40}", "", text)
@@ -172,60 +146,159 @@ def _strip_attribution(text: str) -> str:
     return " ".join(lines).strip()
 
 
-def _fetch_movie_info_via_tavily(movie_title: str) -> dict:
+def _is_low_quality_plot(text: str) -> bool:
     """
-    Fetches movie metadata from the open web via Tavily.
-    Returns a dict with keys: title, original_title, genres, rating,
-    plot_summary, duration. Returns None if fetch fails.
+    Detects marketing, promotional, or commentary/reaction text (release
+    announcements, trailer blurbs, producer credits, review-style hype) that
+    isn't an actual plot description. Returns True if the text should be
+    rejected in favor of trying the next search result.
+    """
+    marketing_markers = [
+        "hits theaters",
+        "in theaters",
+        "official trailer",
+        "release date:",
+        "directed by",
+        "produced by",
+        "executive producer",
+        "starring",
+        "coming soon",
+        "watch the trailer",
+        "tickets now",
+        "box office",
+        "now playing",
+        "★",
+    ]
+    commentary_markers = [
+        "we're breaking down",
+        "we are breaking down",
+        "everyone is talking about",
+        "is one of the",
+        "let's talk about",
+        "recap",
+        "reaction",
+        "creepiest",
+        "scariest movies",
+        "best horror movies",
+        "you need to watch",
+        "here's why",
+        "here's what",
+        "subscribe",
+        "click here",
+    ]
+    text_lower = text.lower()
+    marketing_hits = sum(1 for m in marketing_markers if m in text_lower)
+    commentary_hits = sum(1 for m in commentary_markers if m in text_lower)
+    return marketing_hits >= 2 or commentary_hits >= 1
+
+
+def _fetch_plot_via_tavily(movie_title: str) -> str:
+    """
+    Fetches just the plot description, biased toward Wikipedia which reliably
+    has narrative plot summaries rather than marketing/reaction content.
     """
     if not TAVILY_API_KEY:
-        print("[Tavily] TAVILY_API_KEY not set — skipping web fallback.")
-        return None
+        return ""
     try:
         client = TavilyClient(api_key=TAVILY_API_KEY)
         response = client.search(
-            query=f'"{movie_title}" movie plot summary wikipedia',
+            query=f'"{movie_title}" movie plot summary site:en.wikipedia.org',
             search_depth="advanced",
-            max_results=5,
+            max_results=3,
             include_raw_content=True,
         )
-        if not response or "results" not in response:
-            return None
+        results = response.get("results", []) if response else []
 
-        results = response["results"]
-        # Two-pass: prefer wikipedia.org results first (reliably has real plot
-        # summaries), then fall back to any other non-marketing result.
-        wiki_results = [r for r in results if "wikipedia.org" in r.get("url", "")]
-        other_results = [r for r in results if "wikipedia.org" not in r.get("url", "")]
+        # If no Wikipedia hit, retry without the site restriction
+        if not results:
+            response = client.search(
+                query=f'"{movie_title}" movie plot summary synopsis',
+                search_depth="advanced",
+                max_results=5,
+                include_raw_content=True,
+            )
+            results = response.get("results", []) if response else []
 
-        for res in wiki_results + other_results:
+        for res in results:
             snippet = res.get("content", "")
             raw_full = res.get("raw_content", "")
             raw = snippet if snippet and len(snippet) > 150 else (raw_full or snippet)
             if not raw:
                 continue
             cleaned = _clean_web_text(raw)
-
-            # Skip marketing/promotional pages (trailers, release announcements)
             if _is_low_quality_plot(cleaned):
                 continue
-
             plot_raw = _strip_attribution(cleaned)
             plot_summary = _truncate_at_sentence(plot_raw, char_limit=400)
-            if not plot_summary or _is_low_quality_plot(plot_summary):
-                continue
-
-            return {
-                "title": movie_title,
-                "original_title": _extract_original_title(cleaned, movie_title),
-                "genres": _extract_genres_from_text(cleaned),
-                "rating": _extract_rating_from_text(cleaned),
-                "duration": _extract_duration_from_text(cleaned),
-                "plot_summary": plot_summary,
-            }
+            if plot_summary and not _is_low_quality_plot(plot_summary):
+                return plot_summary
     except Exception as e:
-        print(f"[Tavily] get_movie_info fetch failed for '{movie_title}': {e}")
-    return None
+        print(f"[Tavily] plot fetch failed for '{movie_title}': {e}")
+    return ""
+
+
+def _fetch_metadata_via_tavily(movie_title: str) -> dict:
+    """
+    Fetches genre, rating, and runtime separately from reference-style sources
+    (IMDb, Wikipedia infoboxes, TMDB) rather than relying on whatever the plot
+    search happened to surface — avoids picking up commentary-video runtimes
+    or missing ratings on review/hype pages.
+    """
+    out = {"genres": "N/A", "rating": "N/A", "duration": "N/A"}
+    if not TAVILY_API_KEY:
+        return out
+    try:
+        client = TavilyClient(api_key=TAVILY_API_KEY)
+        response = client.search(
+            query=f'"{movie_title}" movie imdb rating genre runtime cast',
+            search_depth="advanced",
+            max_results=5,
+            include_raw_content=True,
+        )
+        results = response.get("results", []) if response else []
+        combined_text = ""
+        for res in results:
+            snippet = res.get("content", "")
+            raw_full = res.get("raw_content", "")
+            raw = snippet if snippet and len(snippet) > 80 else (raw_full or snippet)
+            if raw:
+                combined_text += " " + _clean_web_text(raw)
+
+        if combined_text:
+            out["genres"] = _extract_genres_from_text(combined_text)
+            out["rating"] = _extract_rating_from_text(combined_text)
+            out["duration"] = _extract_duration_from_text(combined_text)
+    except Exception as e:
+        print(f"[Tavily] metadata fetch failed for '{movie_title}': {e}")
+    return out
+
+
+def _fetch_movie_info_via_tavily(movie_title: str) -> dict:
+    """
+    Fetches movie metadata from the open web via Tavily, using separate
+    targeted searches for plot (Wikipedia-biased) vs metadata (IMDb-biased)
+    so commentary/review pages don't contaminate either result.
+    Returns a dict with keys: title, original_title, genres, rating,
+    plot_summary, duration. Returns None if no usable plot is found.
+    """
+    if not TAVILY_API_KEY:
+        print("[Tavily] TAVILY_API_KEY not set — skipping web fallback.")
+        return None
+
+    plot_summary = _fetch_plot_via_tavily(movie_title)
+    if not plot_summary:
+        return None
+
+    metadata = _fetch_metadata_via_tavily(movie_title)
+
+    return {
+        "title": movie_title,
+        "original_title": movie_title,
+        "genres": metadata["genres"],
+        "rating": metadata["rating"],
+        "duration": metadata["duration"],
+        "plot_summary": plot_summary,
+    }
 
 
 def get_movie_info(movie_title: str) -> str:
@@ -266,7 +339,6 @@ def get_movie_info(movie_title: str) -> str:
         for idx, row in enumerate(rows, 1):
             title, genres, rating, summary, duration, synopsis = row
 
-            # Strip "Written by X" attribution from raw IMDB plot text
             clean_summary_raw = (
                 re.sub(
                     r"\s*Written\s+by\s+[\w\s]*$",
@@ -288,7 +360,6 @@ def get_movie_info(movie_title: str) -> str:
                 else ""
             )
 
-            # If DB plot is missing, fall back to Tavily for this candidate
             if not clean_summary_raw:
                 print(f"--- Plot missing for '{title}' — fetching via Tavily ---")
                 web_info = _fetch_movie_info_via_tavily(title)
