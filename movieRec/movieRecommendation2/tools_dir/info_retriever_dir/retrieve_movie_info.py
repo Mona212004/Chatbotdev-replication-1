@@ -67,8 +67,11 @@ def _extract_duration_from_text(text: str) -> str:
                 r"(\d+)\s*h(?:r|our)?s?\s*(\d+)\s*m(?:in)?",
                 lambda m: f"{m.group(1)}h {m.group(2)}min",
             ),
-            (r"(\d+)\s*h(?:r|our)?s?", lambda m: f"{m.group(1)}h"),
-            (r"(\d{2,3})\s*m(?:in(?:ute)?s?)?", lambda m: f"{m.group(1)}min"),
+            (r"(?<!\d)(\d{1,2})(?!\d)\s*h(?:r|our)?s?", lambda m: f"{m.group(1)}h"),
+            (
+                r"(?<!\d)(\d{2,3})(?!\d)\s*m(?:in(?:ute)?s?)?",
+                lambda m: f"{m.group(1)}min",
+            ),
         ],
     )
     return result or "N/A"
@@ -160,7 +163,11 @@ def _fetch_movie_info_via_tavily(movie_title: str) -> dict:
             return None
 
         for res in response["results"]:
-            raw = res.get("raw_content", res.get("content", ""))
+            # Prefer Tavily's pre-extracted content snippet (already stripped of
+            # nav/menus/logos). Only fall back to raw_content if too short.
+            snippet = res.get("content", "")
+            raw_full = res.get("raw_content", "")
+            raw = snippet if snippet and len(snippet) > 150 else (raw_full or snippet)
             if not raw:
                 continue
             cleaned = _clean_web_text(raw)
@@ -280,10 +287,8 @@ def get_movie_info(movie_title: str) -> str:
         if web_info:
             local_candidates_block = (
                 f"\nCandidate #1: '{web_info['title']}' (via web search)\n"
-                f"- Original Title: {web_info['original_title']}\n"
                 f"- Genres: {web_info['genres']} | Rating: {web_info['rating']} | Duration: {web_info['duration']}\n"
                 f"- Plot Summary: {web_info['plot_summary']}\n"
-                f"- Plot Synopsis: N/A\n"
             )
         else:
             local_candidates_block = (
