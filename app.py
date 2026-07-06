@@ -18,6 +18,40 @@ orig_acompletion = litellm.acompletion
 orig_completion = litellm.completion
 
 
+MAX_TOOL_OUTPUT_CHARS = 2000  # caps a single tool result before it reaches the LLM
+
+
+def truncate_tool_text(text: str, max_chars: int = MAX_TOOL_OUTPUT_CHARS) -> str:
+    """Truncates a tool/function result's text so one large retrieval (Tavily
+    search results, long plot synopses, etc.) can't blow the TPM budget on its
+    own, even when session history is already empty."""
+    if not isinstance(text, str) or len(text) <= max_chars:
+        return text
+    return text[:max_chars] + "\n...[truncated for length]"
+
+
+def truncate_tool_outputs(messages):
+    """Walks the message list and truncates content on tool/function-role
+    messages only — never touches user or assistant text."""
+    if not isinstance(messages, list):
+        return messages
+    for msg in messages:
+        if isinstance(msg, dict):
+            role = msg.get("role")
+            if role in ("tool", "function") and isinstance(msg.get("content"), str):
+                msg["content"] = truncate_tool_text(msg["content"])
+        else:
+            role = getattr(msg, "role", None)
+            if role in ("tool", "function"):
+                content = getattr(msg, "content", None)
+                if isinstance(content, str):
+                    try:
+                        setattr(msg, "content", truncate_tool_text(content))
+                    except Exception:
+                        pass
+    return messages
+
+
 def fix_json_arguments(args_str):
     """Safely converts string arguments into list arrays if a model misformats them."""
     if not args_str or not isinstance(args_str, str):
@@ -153,6 +187,7 @@ def clean_messages(messages):
 async def patched_acompletion(*args, **kwargs):
     if "messages" in kwargs:
         kwargs["messages"] = clean_messages(kwargs["messages"])
+        kwargs["messages"] = truncate_tool_outputs(kwargs["messages"])
     patch_tools_schema(kwargs)
     res = await orig_acompletion(*args, **kwargs)
     return fix_response_obj(res)
@@ -161,6 +196,7 @@ async def patched_acompletion(*args, **kwargs):
 def patched_completion(*args, **kwargs):
     if "messages" in kwargs:
         kwargs["messages"] = clean_messages(kwargs["messages"])
+        kwargs["messages"] = truncate_tool_outputs(kwargs["messages"])
     patch_tools_schema(kwargs)
     res = orig_completion(*args, **kwargs)
     return fix_response_obj(res)
