@@ -182,6 +182,10 @@ GLOBAL_SESSION_ID = "movie_recommender_web_session"
 # Global singleton — Runner is expensive to instantiate; recreating it per request adds seconds of overhead
 runner = None
 
+# Token budget check: leaves headroom under Groq's 8000 TPM limit for the system
+# prompt + tool schemas + new message overhead that isn't part of session.events.
+TOKEN_BUDGET = 5000
+
 
 @app.on_event("startup")
 async def startup_event():
@@ -251,6 +255,17 @@ def clean_agent_thinking(text: str) -> str:
     return "\n".join(filtered_lines).strip()
 
 
+def estimate_tokens(events) -> int:
+    """Rough token estimate across session events (~4 chars per token)."""
+    total_chars = 0
+    for e in events:
+        if e.content and e.content.parts:
+            for p in e.content.parts:
+                if getattr(p, "text", None):
+                    total_chars += len(p.text)
+    return total_chars // 4
+
+
 @app.post("/chat")
 async def chat(request: Request):
     try:
@@ -264,20 +279,33 @@ async def chat(request: Request):
 
         content = types.Content(role="user", parts=[types.Part(text=user_message)])
 
-        # Trim session history to stay within Groq's 8k TPM limit. Two-part strategy:
+        # Trim session history to stay within Groq's 8k TPM limit. Three-part strategy:
         # 1. Strip heavy content (recommendation lists, get_movie_info dumps, find_movie_title
         #    results) from older events — these are large but not needed for the agent to
         #    remember who the user is or what they like. Always keep AUTH_SUCCESS and
         #    preference confirmations intact, regardless of age, since the agent needs
         #    user_id/username/preferences for correct routing on every turn.
         # 2. Cap total events to the last 12 turns as a hard ceiling.
+        # 3. Auto-reset: if the trimmed history is STILL over budget (e.g. a burst of
+        #    back-to-back recommendation/search queries with no idle gap), wipe the
+        #    conversational history entirely and keep only light (auth/preference)
+        #    events. This is size-triggered, not time-triggered, so it fires exactly
+        #    when needed instead of relying on the user waiting out the rate limit.
         HEAVY_MARKERS = [
-            "Match Confidence", "Core Premise", "Plot Summary", "Plot Synopsis",
-            "🎬", "Candidate #", "you're looking for is",
+            "Match Confidence",
+            "Core Premise",
+            "Plot Summary",
+            "Plot Synopsis",
+            "🎬",
+            "Candidate #",
+            "you're looking for is",
         ]
         LIGHT_MARKERS = [
-            "AUTH_SUCCESS", "preferences for user ID", "preferences have been",
-            "preferences are:", "removed",
+            "AUTH_SUCCESS",
+            "preferences for user ID",
+            "preferences have been",
+            "preferences are:",
+            "removed",
         ]
 
         def _is_heavy(event) -> bool:
@@ -312,6 +340,11 @@ async def chat(request: Request):
                 if e not in recent_events:
                     recent_events.insert(0, e)
             session.events = recent_events
+
+        # Auto-reset safety net: fires regardless of elapsed time, only on actual size.
+        if session and hasattr(session, "events"):
+            if estimate_tokens(session.events) > TOKEN_BUDGET:
+                session.events = [e for e in session.events if _is_light(e)]
 
         events_async = runner.run_async(
             session_id=GLOBAL_SESSION_ID,
