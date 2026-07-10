@@ -213,7 +213,7 @@ app = FastAPI(title="AI Movie Recommender API")
 
 # 2. Initialize a global Session Service so chat history persists between HTTP requests
 session_service = InMemorySessionService()
-GLOBAL_SESSION_ID = "movie_recommender_web_session"
+GLOBAL_SESSION_ID = "movie_recommender_web_session2"
 
 # Global singleton — Runner is expensive to instantiate; recreating it per request adds seconds of overhead
 runner = None
@@ -229,11 +229,11 @@ async def startup_event():
     await session_service.create_session(
         session_id=GLOBAL_SESSION_ID,
         state={},
-        app_name="movie_rec_app",
-        user_id="default_web_user",
+        app_name="movie_rec_app2",
+        user_id="default_web_user2",
     )
     runner = Runner(
-        app_name="movie_rec_app",
+        app_name="movie_rec_app2",
         agent=root_agent,
         session_service=session_service,
     )
