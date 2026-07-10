@@ -213,13 +213,16 @@ app = FastAPI(title="AI Movie Recommender API")
 
 # 2. Initialize a global Session Service so chat history persists between HTTP requests
 session_service = InMemorySessionService()
-GLOBAL_SESSION_ID = "movie_recommender_web_session2"
 
-# Global singleton — Runner is expensive to instantiate; recreating it per request adds seconds of overhead
+# --- UNIFIED GLOBAL APPLICATION CONFIGURATION CONSTANTS ---
+GLOBAL_SESSION_ID = "movie_recommender_web_session2"
+GLOBAL_APP_NAME = "movie_rec_app2"
+GLOBAL_USER_ID = "default_web_user2"
+
+# Global singleton — Runner is expensive to instantiate
 runner = None
 
-# Token budget check: leaves headroom under Groq's 8000 TPM limit for the system
-# prompt + tool schemas + new message overhead that isn't part of session.events.
+# Token budget check
 TOKEN_BUDGET = 5000
 
 
@@ -229,11 +232,11 @@ async def startup_event():
     await session_service.create_session(
         session_id=GLOBAL_SESSION_ID,
         state={},
-        app_name="movie_rec_app2",
-        user_id="default_web_user2",
+        app_name=GLOBAL_APP_NAME,
+        user_id=GLOBAL_USER_ID,
     )
     runner = Runner(
-        app_name="movie_rec_app2",
+        app_name=GLOBAL_APP_NAME,
         agent=root_agent,
         session_service=session_service,
     )
@@ -315,18 +318,6 @@ async def chat(request: Request):
 
         content = types.Content(role="user", parts=[types.Part(text=user_message)])
 
-        # Trim session history to stay within Groq's 8k TPM limit. Three-part strategy:
-        # 1. Strip heavy content (recommendation lists, get_movie_info dumps, find_movie_title
-        #    results) from older events — these are large but not needed for the agent to
-        #    remember who the user is or what they like. Always keep AUTH_SUCCESS and
-        #    preference confirmations intact, regardless of age, since the agent needs
-        #    user_id/username/preferences for correct routing on every turn.
-        # 2. Cap total events to the last 12 turns as a hard ceiling.
-        # 3. Auto-reset: if the trimmed history is STILL over budget (e.g. a burst of
-        #    back-to-back recommendation/search queries with no idle gap), wipe the
-        #    conversational history entirely and keep only light (auth/preference)
-        #    events. This is size-triggered, not time-triggered, so it fires exactly
-        #    when needed instead of relying on the user waiting out the rate limit.
         HEAVY_MARKERS = [
             "Match Confidence",
             "Core Premise",
@@ -360,46 +351,50 @@ async def chat(request: Request):
                     return True
             return False
 
+        # Fixed: Checking with matching global alignment parameters
         session = await session_service.get_session(
-            app_name="movie_rec_app",
-            user_id="default_web_user",
+            app_name=GLOBAL_APP_NAME,
+            user_id=GLOBAL_USER_ID,
             session_id=GLOBAL_SESSION_ID,
         )
+
+        if session is None:
+            session = await session_service.create_session(
+                app_name=GLOBAL_APP_NAME,
+                user_id=GLOBAL_USER_ID,
+                session_id=GLOBAL_SESSION_ID,
+                state={},
+            )
+
         if session and hasattr(session, "events") and len(session.events) > 12:
             light_events = [e for e in session.events if _is_light(e)]
             recent_events = session.events[-12:]
-            # Drop heavy recommendation/search-result events from the recent window
-            # too — they're large and not needed for the agent to keep context.
             recent_events = [e for e in recent_events if not _is_heavy(e)]
-            # Always keep light (auth/preference) events even if older than the window
             for e in light_events:
                 if e not in recent_events:
                     recent_events.insert(0, e)
             session.events = recent_events
 
-        # Auto-reset safety net: fires regardless of elapsed time, only on actual size.
         if session and hasattr(session, "events"):
             if estimate_tokens(session.events) > TOKEN_BUDGET:
                 session.events = [e for e in session.events if _is_light(e)]
 
+        # Fixed: Passing matching global identifiers to runner
         events_async = runner.run_async(
             session_id=GLOBAL_SESSION_ID,
-            user_id="default_web_user",
+            user_id=GLOBAL_USER_ID,
             new_message=content,
         )
 
         response_text = ""
         tools_called = []
         async for event in events_async:
-            # Collect tool names from all events (tool calls fire before the final response event)
             if event.content and event.content.parts:
                 for part in event.content.parts:
                     fc = getattr(part, "function_call", None)
                     if fc and getattr(fc, "name", None):
                         tools_called.append(fc.name)
 
-            # Only pull text from the final response — skips all intermediate tool call/result
-            # events that previously required clean_agent_thinking to filter out
             if event.is_final_response() and event.content and event.content.parts:
                 for part in event.content.parts:
                     if part.text:
