@@ -213,7 +213,12 @@ app = FastAPI(title="AI Movie Recommender API")
 
 # 2. Initialize a global Session Service so chat history persists between HTTP requests
 session_service = InMemorySessionService()
-GLOBAL_SESSION_ID = "movie_recommender_web_session"
+
+# Fallback identifiers — used only if a request doesn't send its own session_id/user_id
+# (e.g. an older frontend), so existing callers don't break.
+DEFAULT_SESSION_ID = "movie_recommender_web_session"
+DEFAULT_USER_ID = "default_web_user"
+APP_NAME = "movie_rec_app"
 
 # Global singleton — Runner is expensive to instantiate; recreating it per request adds seconds of overhead
 runner = None
@@ -226,14 +231,8 @@ TOKEN_BUDGET = 5000
 @app.on_event("startup")
 async def startup_event():
     global runner
-    await session_service.create_session(
-        session_id=GLOBAL_SESSION_ID,
-        state={},
-        app_name="movie_rec_app",
-        user_id="default_web_user",
-    )
     runner = Runner(
-        app_name="movie_rec_app",
+        app_name=APP_NAME,
         agent=root_agent,
         session_service=session_service,
     )
@@ -292,13 +291,23 @@ def clean_agent_thinking(text: str) -> str:
 
 
 def estimate_tokens(events) -> int:
-    """Rough token estimate across session events (~4 chars per token)."""
+    """Rough token estimate across session events (~4 chars per token).
+    Counts text parts AND structured tool-call/tool-result parts
+    (function_call.args, function_response.response), which is where most
+    of the actual token weight from get_movie_info/recommend_* results
+    lives — plain `.text` alone drastically undercounts a tool-heavy turn."""
     total_chars = 0
     for e in events:
         if e.content and e.content.parts:
             for p in e.content.parts:
                 if getattr(p, "text", None):
                     total_chars += len(p.text)
+                fc = getattr(p, "function_call", None)
+                if fc is not None and getattr(fc, "args", None):
+                    total_chars += len(str(fc.args))
+                fr = getattr(p, "function_response", None)
+                if fr is not None and getattr(fr, "response", None):
+                    total_chars += len(str(fr.response))
     return total_chars // 4
 
 
@@ -312,6 +321,13 @@ async def chat(request: Request):
             return JSONResponse(
                 status_code=400, content={"error": "Message parameter is required"}
             )
+
+        # Pulled from the frontend's request instead of hardcoded, so each caller/tab
+        # gets its own isolated session instead of everyone sharing one growing history.
+        # Falls back to the old shared defaults if a caller doesn't send them, so
+        # existing/older frontends don't break.
+        session_id = data.get("session_id") or DEFAULT_SESSION_ID
+        user_id = data.get("user_id") or DEFAULT_USER_ID
 
         content = types.Content(role="user", parts=[types.Part(text=user_message)])
 
@@ -344,11 +360,27 @@ async def chat(request: Request):
             "removed",
         ]
 
+        def _part_text(p) -> str:
+            """Pulls searchable/countable text out of a part, including
+            structured tool-call/tool-result content that ADK stores outside
+            of `.text` (function_call.args, function_response.response)."""
+            chunks = []
+            if getattr(p, "text", None):
+                chunks.append(p.text)
+            fc = getattr(p, "function_call", None)
+            if fc is not None and getattr(fc, "args", None):
+                chunks.append(str(fc.args))
+            fr = getattr(p, "function_response", None)
+            if fr is not None and getattr(fr, "response", None):
+                chunks.append(str(fr.response))
+            return "\n".join(chunks)
+
         def _is_heavy(event) -> bool:
             if not (event.content and event.content.parts):
                 return False
             for p in event.content.parts:
-                if p.text and any(m in p.text for m in HEAVY_MARKERS):
+                text = _part_text(p)
+                if text and any(m in text for m in HEAVY_MARKERS):
                     return True
             return False
 
@@ -356,15 +388,25 @@ async def chat(request: Request):
             if not (event.content and event.content.parts):
                 return False
             for p in event.content.parts:
-                if p.text and any(m in p.text for m in LIGHT_MARKERS):
+                text = _part_text(p)
+                if text and any(m in text for m in LIGHT_MARKERS):
                     return True
             return False
 
         session = await session_service.get_session(
-            app_name="movie_rec_app",
-            user_id="default_web_user",
-            session_id=GLOBAL_SESSION_ID,
+            app_name=APP_NAME,
+            user_id=user_id,
+            session_id=session_id,
         )
+        if session is None:
+            # First message from this session_id/user_id — create it now instead of
+            # relying on a single session bootstrapped once at startup.
+            session = await session_service.create_session(
+                app_name=APP_NAME,
+                user_id=user_id,
+                session_id=session_id,
+                state={},
+            )
         if session and hasattr(session, "events") and len(session.events) > 12:
             light_events = [e for e in session.events if _is_light(e)]
             recent_events = session.events[-12:]
@@ -383,8 +425,8 @@ async def chat(request: Request):
                 session.events = [e for e in session.events if _is_light(e)]
 
         events_async = runner.run_async(
-            session_id=GLOBAL_SESSION_ID,
-            user_id="default_web_user",
+            session_id=session_id,
+            user_id=user_id,
             new_message=content,
         )
 
