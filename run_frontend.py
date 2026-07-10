@@ -1,4 +1,3 @@
-import uuid
 import gradio as gr
 import requests
 
@@ -6,24 +5,15 @@ import requests
 BACKEND_URL = "https://movie-recommender-api-6oqf.onrender.com/chat"
 
 
-def new_session_id():
-    """One unique session id per browser tab, generated when the tab loads."""
-    return str(uuid.uuid4())
-
-
-def chat_with_agent(user_message, history, session_id):
+def chat_with_agent(user_message, history):
     try:
         clean_message = user_message.strip()
         if not clean_message:
             return "Please type a message to chat with the agent."
 
-        # session_id isolates this tab's conversation on the backend so it doesn't
-        # share (and get crowded out by) every other visitor's history.
-        payload = {
-            "message": clean_message,
-            "session_id": session_id,
-            "user_id": f"web_{session_id}",
-        }
+        # The Fix: Wrap the input in a standard JSON key-value dictionary object
+        # This gives the validation layer the structure it needs to run .get() safely!
+        payload = {"message": clean_message}
 
         response = requests.post(BACKEND_URL, json=payload)
 
@@ -59,13 +49,9 @@ with gr.Blocks() as demo:  # Removed theme parameter from here
         "**Backend Status:** Live on Render Cloud Engine | **Database Layer:** Neon PostgreSQL (`user_data` table)"
     )
 
-    # One session id per tab, created fresh each time the page loads
-    session_id_state = gr.State(new_session_id)
-
     # Render interactive multi-turn chat window component
     gr.ChatInterface(
         fn=chat_with_agent,
-        additional_inputs=[session_id_state],
         examples=test_examples,
         cache_examples=False,  # Disable static cache to force dynamic live server integration
     )
