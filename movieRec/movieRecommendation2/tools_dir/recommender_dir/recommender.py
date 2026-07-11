@@ -125,7 +125,7 @@ def _fetch_context_string_via_tavily(movie_title: str) -> Optional[str]:
 
         # Open-web query — no site restriction so recent TV series, documentaries,
         # and titles missing from IMDB are found on Wikipedia, streaming sites, etc.
-        refined_query = f'"{movie_title}" plot summary synopsis genres runtime rating'
+        refined_query = f'"{movie_title}" film plot summary synopsis genres runtime rating'
 
         search_response = tavily_client.search(
             query=refined_query,
@@ -143,6 +143,8 @@ def _fetch_context_string_via_tavily(movie_title: str) -> Optional[str]:
 
             # Strip HTML tags and collapse whitespace first
             cleaned = _clean_web_text(raw)
+            if not re.search(r"\b(film|movie)\b", cleaned.lower()):
+                continue
 
             # Extract structured fields before truncating
             duration_str = _extract_duration(cleaned)
