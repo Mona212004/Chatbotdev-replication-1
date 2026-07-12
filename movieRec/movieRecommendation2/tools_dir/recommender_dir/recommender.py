@@ -538,9 +538,7 @@ def recommend_from_preferences(user_id: int) -> str:
                     for _ in prefs.liked_genres
                 ]
             )
-            inner_select += (
-                f", (1.0 + 1.5 * ({genre_score_cases})) AS intersection_multiplier"
-            )
+            inner_select += f", (1.0 + 0.15 * ({genre_score_cases})) AS intersection_multiplier"
             all_params.extend([f"%{g}%" for g in prefs.liked_genres])
         else:
             inner_select += ", 1.0 AS intersection_multiplier"
