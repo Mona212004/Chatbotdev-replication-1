@@ -73,7 +73,10 @@ def _extract_rating(text: str) -> str:
         if match:
             try:
                 val = float(match.group(1))
-                if 1.0 <= val <= 10.0:
+                # Tightened floor from 1.0 to 3.0 — ratings below this are almost
+                # always mis-extracted noise (footnote numbers, review counts,
+                # content-rating table fragments) rather than real quality scores.
+                if 3.0 <= val <= 10.0:
                     return f"{val:.1f}"
             except ValueError:
                 continue
@@ -105,7 +108,13 @@ def _extract_plot_text(raw_text: str) -> str:
         for l in lines
         if len(l.strip()) > 40 or (l.strip() and not l.strip().isupper())
     ]
-    return " ".join(lines)[:800].strip()
+    # Truncation reduced from 800 to 500 characters. The full context string
+    # template (title/genres/duration/rating wrapper text) adds overhead on
+    # top of this, and the embedding model has a hard 512-token limit — an
+    # 800-char plot_text was measured to produce ~556 tokens, overflowing the
+    # limit and silently degrading the resulting embedding.
+    return " ".join(lines)[:500].strip()
+
 
 def _fetch_context_string_via_tavily(movie_title: str) -> Optional[str]:
     """
@@ -201,6 +210,7 @@ def _fetch_context_string_via_tavily(movie_title: str) -> Optional[str]:
         print(f"[Tavily] Fetch failed for '{movie_title}': {e}")
     return None
 
+
 # ── Output formatter ───────────────────────────────────────────────────────────
 
 
@@ -247,7 +257,9 @@ def recommend_similar_to_movie(
     Recommends movies using vector similarity, leveraging the exact same subquery
     and scalar intersection multiplier model used in recommend_from_preferences.
     """
-    print(f"[DEBUG] recommend_similar_to_movie called with movie_title={movie_title!r}, filter_genres={filter_genres!r}")
+    print(
+        f"[DEBUG] recommend_similar_to_movie called with movie_title={movie_title!r}, filter_genres={filter_genres!r}"
+    )
     conn = None
     try:
         config = load_config()
@@ -271,6 +283,8 @@ def recommend_similar_to_movie(
                 FROM embeddings_table e
                 JOIN cleaned_imdb c ON e.tconst = c.tconst
                 WHERE c.primarytitle ILIKE %s AND e.chunk_id = 0
+                ORDER BY (c.plot_summary IS NOT NULL AND c.plot_summary != '') DESC,
+                         c.averagerating DESC NULLS LAST
                 LIMIT 1
                 """,
                 (movie_title,),
@@ -442,6 +456,8 @@ def recommend_from_preferences(user_id: int) -> str:
                         JOIN cleaned_imdb c ON e.tconst = c.tconst
                         WHERE LOWER(c.primarytitle) = LOWER(%s)
                           AND e.chunk_id = 0
+                        ORDER BY (c.plot_summary IS NOT NULL AND c.plot_summary != '') DESC,
+                                 c.averagerating DESC NULLS LAST
                         LIMIT 1
                         """,
                         (title,),
