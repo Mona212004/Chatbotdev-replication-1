@@ -358,13 +358,8 @@ def recommend_similar_to_movie(
                     for _ in target_genres
                 ]
             )
-            # Weight reduced from 0.4 to 0.15 so genre-tag overlap nudges ranking
-            # rather than dominating it — with 0.4, a movie sharing all seed genres
-            # could outrank a movie with much closer semantic (cosine) distance,
-            # biasing results toward generic genre-cluster "prestige" titles over
-            # movies that are actually thematically similar.
             inner_select += (
-                f", (1.0 + 0.15 * ({genre_score_cases})) AS intersection_multiplier"
+                f", (1.0 + 0.4 * ({genre_score_cases})) AS intersection_multiplier"
             )
             all_params.extend([f"%{g}%" for g in target_genres])
         else:
@@ -388,14 +383,15 @@ def recommend_similar_to_movie(
         inner_from_where += " AND c.primarytitle NOT ILIKE %s"
         all_params.append(f"%{movie_title}%")
 
-        # NOTE: the hard genre-overlap WHERE filter was removed here. It used
-        # to require candidates to share at least one genre tag with the seed
-        # movie, which excluded any semantically similar film that happened to
-        # be tagged with different genre labels (e.g. a "Drama,Thriller" film
-        # being excluded as a match for a "Crime,Drama,Horror" seed, even if
-        # its plot is a much closer thematic match). Genre overlap is now a
-        # ranking signal only, via intersection_multiplier in ORDER BY below —
-        # it nudges genre-matching movies higher without excluding non-matches.
+        # Hard genre overlap: require results to share at least one genre with the
+        # seed movie. Prevents semantic bleeding where physics vocabulary in
+        # Oppenheimer matches sci-fi films that share no actual genre DNA.
+        if target_genres:
+            genre_overlap_clauses = " OR ".join(
+                ["c.genres ILIKE %s" for _ in target_genres]
+            )
+            inner_from_where += f" AND ({genre_overlap_clauses})"
+            all_params.extend([f"%{g}%" for g in target_genres])
 
         # Mirroring the preference routine's exact derived subquery table wrapping logic
         full_query = f"""
