@@ -107,8 +107,7 @@ def _extract_plot_text(raw_text: str) -> str:
     ]
     return " ".join(lines)[:800].strip()
 
-
-def _fetch_context_string_via_tavily(movie_title: str, disambiguator: str = "") -> Optional[str]:
+def _fetch_context_string_via_tavily(movie_title: str) -> Optional[str]:
     """
     Fetches plot, genre, duration and rating for any title (movie, TV series,
     documentary) from the open web via Tavily — not restricted to IMDB.
@@ -125,8 +124,9 @@ def _fetch_context_string_via_tavily(movie_title: str, disambiguator: str = "") 
 
         # Open-web query — no site restriction so recent TV series, documentaries,
         # and titles missing from IMDB are found on Wikipedia, streaming sites, etc.
-        qualifier = f" {disambiguator}" if disambiguator else ""
-        refined_query = f'"{movie_title}"{qualifier} film plot summary synopsis genres runtime rating'
+        refined_query = (
+            f'"{movie_title}" film plot summary synopsis genres runtime rating'
+        )
 
         search_response = tavily_client.search(
             query=refined_query,
@@ -201,7 +201,6 @@ def _fetch_context_string_via_tavily(movie_title: str, disambiguator: str = "") 
         print(f"[Tavily] Fetch failed for '{movie_title}': {e}")
     return None
 
-
 # ── Output formatter ───────────────────────────────────────────────────────────
 
 
@@ -242,12 +241,13 @@ def _format_results(rows: List[Any]) -> str:
 
 # ── Recommender functions ──────────────────────────────────────────────────────
 def recommend_similar_to_movie(
-    movie_title: str, filter_genres: Optional[List[str]] = None, disambiguator: str = ""
+    movie_title: str, filter_genres: Optional[List[str]] = None
 ) -> str:
     """
     Recommends movies using vector similarity, leveraging the exact same subquery
     and scalar intersection multiplier model used in recommend_from_preferences.
     """
+    print(f"[DEBUG] recommend_similar_to_movie called with movie_title={movie_title!r}, filter_genres={filter_genres!r}")
     conn = None
     try:
         config = load_config()
@@ -289,7 +289,7 @@ def recommend_similar_to_movie(
                     print(
                         f"[Recommender] '{movie_title}' in DB but plot missing — fetching via Tavily."
                     )
-                    context_string = _fetch_context_string_via_tavily(movie_title, disambiguator)
+                    context_string = _fetch_context_string_via_tavily(movie_title)
                     if context_string:
                         vecs = query_to_vectors([context_string])
                         if vecs is not None and len(vecs) > 0 and vecs[0] is not None:

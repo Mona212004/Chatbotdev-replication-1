@@ -51,11 +51,9 @@ CALL get_movie_info if:
   
 CALL recommend_similar_to_movie if:
   - The user asks for recommendations similar to a movie using phrases like "recommend movies like", "similar movies to", or "what are some movies like".
-  - Pass ONLY the movie title string as the parameter 'movie_title'. Do not pass the full query.
-  - If the user includes a qualifier that distinguishes the movie from other same-titled films (e.g. nationality like "Japanese", "Korean"; a year; "the true crime one", "the animated one"), extract that qualifier separately as the parameter 'disambiguator'. Otherwise pass disambiguator as an empty string.
-  - Pass the list of mentioned genres exactly as written as the parameter 'genres'. If genres are not mentioned, default the parameter genres to an empty list.
+  - Pass ONLY the movie title string as the parameter 'movie_title' and the list of mentioned genres exactly as written as the parameter 'genres' to recommend_similar_to_movie tool. Do not pass the full query. If genres are not mentioned, default the parameter genre to an empty list.
   - CRITICAL WARNING FOR QWEN: Do NOT pass [EXTRACTED_ID] or any user ID to this tool. It is forbidden.
-   
+  
 CALL recommend_from_preferences if:
   - The user asks for recommendations based on their preferences and the query contains keywords such as "recommend movies based on my preferences", "recommend movies based on what i like", "recommend movies based on my taste", "recommend movies based on my profile".
   - Do not pass the whole user query as a parameter. Extract the user ID from the "AUTH_SUCCESS" line in the conversation history and pass it as a parameter to recommend_from_preferences. 
