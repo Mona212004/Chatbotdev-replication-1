@@ -215,9 +215,9 @@ app = FastAPI(title="AI Movie Recommender API")
 session_service = InMemorySessionService()
 
 # --- UNIFIED GLOBAL APPLICATION CONFIGURATION CONSTANTS ---
-GLOBAL_SESSION_ID = "movie_recommender_web_session4"
-GLOBAL_APP_NAME = "movie_rec_app4"
-GLOBAL_USER_ID = "default_web_user4"
+GLOBAL_SESSION_ID = "movie_recommender_web_session5"
+GLOBAL_APP_NAME = "movie_rec_app5"
+GLOBAL_USER_ID = "default_web_user5"
 
 # Global singleton — Runner is expensive to instantiate
 runner = None
